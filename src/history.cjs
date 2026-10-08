@@ -135,11 +135,13 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   let recorded = 0;
   for (const id of composer.subagentComposerIds || []) recorded += recordChat(db, id, dir, visited);
 
+  // Chats opened but never sent have no messages: nothing to keep.
+  const hashes = store.rootMessageHashes(composer.conversationState);
+  if (!hashes.length) return recorded;
   const chatDir = chatDirFor(db, dir, composerId, composer.name || 'Untitled chat');
   const snapshotFile = path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}.json`);
   if (fs.existsSync(snapshotFile)) return recorded;
 
-  const hashes = store.rootMessageHashes(composer.conversationState);
   for (const hash of hashes) {
     const blobFile = path.join(dir, 'blobs', `${hash}.json`);
     if (fs.existsSync(blobFile)) continue;
@@ -254,10 +256,13 @@ function transcript(dir, meta, current, subagents = [], parent) {
 
 // Earlier versions named folders by chat id (0.5–0.8.0) and stored subagents as
 // top-level chats (0.5–0.6); rename them and move subagents under their parent.
+// Each folder is checked once per recorder; recordChat renames chats that change.
+const checkedFolders = new Set();
 function migrateLayout(db, dir) {
   const chatsDir = path.join(dir, 'chats');
   let moved = 0;
   const walk = (from, id) => {
+    if (checkedFolders.has(from)) return;
     // Parent links come from Cursor's DB: metas written by 0.5 lack parentComposerId.
     const name = chatName(db, id) || readJson(path.join(from, 'meta.json'), {}).name;
     const target = chatDirFor(db, dir, id, name, from);
@@ -267,6 +272,7 @@ function migrateLayout(db, dir) {
     if (fs.existsSync(from) && target !== from) mergeInto(from, target);
     const subDir = path.join(target, 'subagents');
     for (const [entry, subId] of [...folderOwners(subDir)]) walk(path.join(subDir, entry), subId);
+    checkedFolders.add(target);
   };
   for (const [entry, id] of [...folderOwners(chatsDir)]) if (fs.existsSync(path.join(chatsDir, entry))) walk(path.join(chatsDir, entry), id);
   return moved;
@@ -292,14 +298,16 @@ function writeIndex(dir) {
   writeAtomic(path.join(dir, 'index.json'), JSON.stringify(chats, null, 2));
 }
 
-// Record every chat updated after `since` (ms). Returns { recorded, watermark }.
-function recordUpdatedSince(db, dir, since) {
+// Record chats updated after `since` and up to `until` (ms), oldest first, at most
+// `limit` of them. Returns { recorded, watermark, more }.
+function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
   const rows = db.prepare(`
-    SELECT substr(key, 14) AS id, COALESCE(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) AS t
-    FROM cursorDiskKV
-    WHERE key LIKE 'composerData:%'
-      AND COALESCE(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) > ?
-      AND json_extract(value, '$.conversationState') IS NOT NULL`).all(since);
+    SELECT id, t FROM (
+      SELECT substr(key, 14) AS id, COALESCE(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) AS t
+      FROM cursorDiskKV
+      WHERE key LIKE 'composerData:%' AND json_extract(value, '$.conversationState') IS NOT NULL)
+    WHERE t > ? AND t <= ?
+    ORDER BY t LIMIT ?`).all(since, until, limit);
   let recorded = 0;
   let watermark = since;
   for (const r of rows) {
@@ -307,7 +315,7 @@ function recordUpdatedSince(db, dir, since) {
     watermark = Math.max(watermark, r.t);
   }
   if (recorded) writeIndex(dir);
-  return { recorded, watermark };
+  return { recorded, watermark, more: limit >= 0 && rows.length === limit };
 }
 
 // One recorder per machine: several Cursor windows share the history directory.
@@ -318,7 +326,10 @@ function tryLock(dir, staleMs) {
   const held = readJson(file, undefined);
   if (held && held.pid !== process.pid && now - held.at < staleMs) return false;
   // Another window may have renamed folders while it held the lock.
-  if (!held || held.pid !== process.pid) ownersCache.clear();
+  if (!held || held.pid !== process.pid) {
+    ownersCache.clear();
+    checkedFolders.clear();
+  }
   writeAtomic(file, JSON.stringify({ pid: process.pid, at: now }));
   return true;
 }
@@ -326,19 +337,34 @@ function tryLock(dir, staleMs) {
 // 3: folders named after chats. 2: subagents nested in their parent.
 const LAYOUT = 3;
 
-// Called periodically. First run records the last `backfillDays` of chats.
-function tick(db, dir, { backfillDays = 7, staleMs = 90000 } = {}) {
+// Called periodically. Records chats updated since the last tick, then catches up
+// on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
+// Returns `backfilling` while older chats remain.
+function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000 } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
-  const state = readJson(stateFile, { watermark: Date.now() - backfillDays * 86400000, layout: LAYOUT });
+  const now = Date.now();
+  const state = readJson(stateFile, { watermark: now, layout: LAYOUT });
+  // Before 0.10 the first run went back only 7 days and never further.
+  if (!state.backfill) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
   // Every tick: windows still running an older version may write id-named or flat folders.
   const migrated = migrateLayout(db, dir);
   const relayout = migrated || state.layout !== LAYOUT;
   if (relayout) rebuildTranscripts(db, dir);
   const result = recordUpdatedSince(db, dir, state.watermark);
-  if (relayout && !result.recorded) writeIndex(dir);
-  if (relayout || result.watermark !== state.watermark) writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT }));
-  return { ...result, migrated };
+  let { recorded } = result;
+  const before = JSON.stringify(state.backfill);
+  if (!state.backfill.done) {
+    const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch });
+    recorded += older.recorded;
+    // One ms back: chats sharing the batch's last timestamp may not all be in it.
+    state.backfill = older.more ? { ...state.backfill, from: older.watermark - 1 } : { done: true };
+  }
+  if (relayout && !recorded) writeIndex(dir);
+  if (relayout || result.watermark !== state.watermark || JSON.stringify(state.backfill) !== before) {
+    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, backfill: state.backfill }));
+  }
+  return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done };
 }
 
 module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex };

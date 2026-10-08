@@ -34,26 +34,30 @@ function historyDir() {
 }
 
 // Snapshot changed chats every 30 s; one window records, the others skip.
+// Older chats are caught up in small batches, every 5 s until done.
 function startRecorder(context) {
   if (!settings().get('recordHistory')) return;
   let db;
   let lastWrite;
+  let backfilling = true;
+  let timer;
   const run = () => {
     try {
       // Cursor commits through the WAL; unchanged mtime means no chat changed.
       const dbPath = databasePath(context);
       const stat = fs.statSync(`${dbPath}-wal`, { throwIfNoEntry: false }) || fs.statSync(dbPath);
-      if (stat.mtimeMs === lastWrite) return;
-      lastWrite = stat.mtimeMs;
-      db = db || store.openDatabase(dbPath);
-      history.tick(db, historyDir(), { backfillDays: settings().get('historyBackfillDays') });
+      if (stat.mtimeMs !== lastWrite || backfilling) {
+        lastWrite = stat.mtimeMs;
+        db = db || store.openDatabase(dbPath);
+        backfilling = !!history.tick(db, historyDir(), { backfillDays: settings().get('historyBackfillDays') }).backfilling;
+      }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);
     }
+    timer = setTimeout(run, backfilling ? 5000 : 30000);
   };
-  const first = setTimeout(run, 5000);
-  const timer = setInterval(run, 30000);
-  context.subscriptions.push({ dispose: () => { clearTimeout(first); clearInterval(timer); if (db) db.close(); } });
+  timer = setTimeout(run, 5000);
+  context.subscriptions.push({ dispose: () => { clearTimeout(timer); if (db) db.close(); } });
 }
 
 async function openHistoryFolder() {

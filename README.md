@@ -64,9 +64,12 @@ A chat's subagents are recorded together with it. Folders written by earlier
 versions (named by chat id, or subagents at the top level) are renamed and
 moved under their parent automatically.
 
-The first run also records chats from the last
-`cursorContextInspector.historyBackfillDays` (7) days. **Record History of All
-Chats** backfills everything; **Open Session History Folder** opens it.
+Older chats are recorded too: every chat Cursor still has, caught up in the
+background 50 at a time every 5 s (a few minutes for a couple of thousand
+chats). Set `cursorContextInspector.historyBackfillDays` to keep only the last
+that many days. Chats that were opened but never sent are skipped. **Record
+History of All Chats** records everything at once; **Open Session History
+Folder** opens the folder.
 
 ## Where the data comes from
 

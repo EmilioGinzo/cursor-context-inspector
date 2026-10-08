@@ -175,3 +175,33 @@ test('a chat recorded again by an older window is merged into its named folder',
   assert.ok(JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8')).seen.includes('extra'));
   assert.strictEqual(history.tick(db, dir).migrated, 0, 'nothing left to merge');
 });
+
+test('older chats are caught up in batches, also after an earlier 7-day backfill', () => {
+  const { db, save, dir } = setup();
+  for (let i = 1; i <= 5; i++) save(i * 1000, [sys, { role: 'user', content: `question ${i}` }], { id: `chat-${i}`, name: `Chat ${i}` });
+  save(6000, [], { id: 'draft', name: 'Never sent' });
+  // An earlier version recorded only chats newer than its watermark.
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 4500, layout: 3 }));
+  const first = history.tick(db, dir, { backfillBatch: 2 });
+  assert.strictEqual(first.recorded, 3, 'chat 5 since the watermark, chats 1–2 from the backfill');
+  assert.strictEqual(first.backfilling, true);
+  let rest = 0;
+  for (let ticks = 0, r = first; r.backfilling; ticks++) {
+    assert.ok(ticks < 5, 'backfill finishes');
+    r = history.tick(db, dir, { backfillBatch: 2 });
+    rest += r.recorded;
+  }
+  assert.strictEqual(rest, 2, 'chats 3–4, each once');
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')).sort(), ['Chat 1', 'Chat 2', 'Chat 3', 'Chat 4', 'Chat 5'], 'drafts without messages are skipped');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).length, 5);
+  save(7000, [sys, first], { id: 'chat-6', name: 'Chat 6' });
+  assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).backfilling], [1, false], 'new chats still recorded after the backfill');
+});
+
+test('historyBackfillDays limits the catch-up', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys], { id: 'old', name: 'Old chat' });
+  save(Date.now() - 3600000, [sys], { id: 'recent', name: 'Recent chat' });
+  history.tick(db, dir, { backfillDays: 1 });
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')), ['Recent chat']);
+});

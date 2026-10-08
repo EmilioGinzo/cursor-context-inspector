@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src 'nonce-{{nonce}}';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style nonce="{{nonce}}">
+  :root {
+    --c-system_prompt: #a3a3a3; --c-tools: #a99cf5; --c-rules: #a3d97a; --c-skills: #f5d76e;
+    --c-mcp: #9d8cf0; --c-subagents: #f59f6e; --c-summarized_conversation: #6ec9f5; --c-conversation: #f0806a; --c-raw: #777;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+  .layout { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; height: 100vh; }
+  .left { border-right: 1px solid var(--vscode-panel-border); overflow: auto; padding: 12px; }
+  .right { display: flex; flex-direction: column; min-width: 0; }
+  .toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
+  select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); padding: 3px; }
+  button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 4px 9px; border-radius: 3px; cursor: pointer; }
+  button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  label.follow { display: flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+  .card { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 8px; padding: 12px; }
+  .title { font-weight: 600; margin-bottom: 8px; }
+  .summary { display: flex; justify-content: space-between; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
+  .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--vscode-input-background); margin-bottom: 10px; }
+  .meta { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; user-select: none; }
+  .row:hover { background: var(--vscode-list-hoverBackground); }
+  .row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .row .chev { width: 12px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+  .row .sw { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .tok { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+  .row.dim .name { opacity: .6; }
+  .children { margin-left: 14px; }
+  .sep { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
+  .viewer-head { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); }
+  .viewer-head .vt { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .viewer-head .vm { color: var(--vscode-descriptionForeground); }
+  input.find { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; width: 160px; }
+  pre { flex: 1; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+  mark { background: var(--vscode-editor-findMatchHighlightBackground); color: inherit; }
+  .empty { color: var(--vscode-descriptionForeground); padding: 24px; }
+  .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="left">
+    <div class="toolbar">
+      <select id="chat" title="Chat"></select>
+      <button id="refresh" title="Refresh">↻</button>
+    </div>
+    <div class="toolbar"><label class="follow"><input type="checkbox" id="follow"> Follow the most recently active chat</label></div>
+    <div class="card">
+      <div class="title">Context Usage</div>
+      <div class="summary"><span id="pct"></span><span id="tot"></span></div>
+      <div class="bar" id="bar"></div>
+      <div class="meta" id="meta"></div>
+      <div id="cats"></div>
+    </div>
+    <div id="err" class="error"></div>
+  </div>
+  <div class="right">
+    <div class="viewer-head">
+      <span class="vt" id="vt">Select a category or item</span>
+      <span class="vm" id="vm"></span>
+      <input class="find" id="find" placeholder="Find in text">
+      <button id="copy" disabled>Copy</button>
+      <button id="open" disabled>Open in editor</button>
+    </div>
+    <pre id="text"><span class="empty">Click any row on the left to see the exact text the agent received for it.</span></pre>
+  </div>
+</div>
+<script nonce="{{nonce}}">
+  const vscode = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+  const state = vscode.getState() || { open: {}, selected: undefined };
+  let ctx, currentText = '';
+
+  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n ?? 0));
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const save = () => vscode.setState(state);
+
+  window.addEventListener('message', ({ data: m }) => {
+    if (m.type === 'context') { $('err').textContent = ''; ctx = m.context; renderChats(m.chats); $('follow').checked = m.follow; render(); if (state.selected) select(state.selected, true); }
+    else if (m.type === 'text' && m.id === state.selected) showText(m);
+    else if (m.type === 'error') $('err').textContent = m.message;
+  });
+
+  function renderChats(chats) {
+    const sel = $('chat');
+    if (!chats.some((c) => c.id === ctx.composerId)) chats = [{ id: ctx.composerId, name: ctx.name, used: ctx.totalUsedTokens }, ...chats];
+    sel.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.name || 'Untitled chat')} — ${fmt(c.used)} tok · ${new Date(c.lastUpdatedAt).toLocaleString()}</option>`).join('');
+    sel.value = ctx.composerId;
+  }
+
+  function render() {
+    const pct = ctx.maxTokens ? Math.round((ctx.totalUsedTokens / ctx.maxTokens) * 100) : 0;
+    $('pct').textContent = `${pct}% Full`;
+    $('tot').textContent = `~${fmt(ctx.totalUsedTokens)} / ${fmt(ctx.maxTokens)} Tokens`;
+    $('bar').innerHTML = ctx.categories.map((c) => `<div style="width:${ctx.maxTokens ? (c.estimatedTokens / ctx.maxTokens) * 100 : 0}%;background:var(--c-${c.id})"></div>`).join('');
+    $('meta').textContent = `${ctx.model || ''} · ${ctx.hasTree ? 'item spans from Cursor’s usage tree' : 'items parsed from the stored prompt'}`;
+    const cats = ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
+    $('cats').innerHTML = cats.map((c) => category(c.id, c.label, c.estimatedTokens, c.items)).join('') +
+      '<div class="sep"></div>' + category('raw', 'All prompt messages (raw)', undefined, ctx.rawMessages);
+  }
+
+  function category(id, label, tokens, items) {
+    const key = `category:${id}`;
+    return row(key, label, tokens, items.length > 0, `var(--c-${id})`, false) +
+      (state.open[key] ? `<div class="children">${items.map(item).join('')}</div>` : '');
+  }
+
+  function item(i) {
+    const kids = i.children && i.children.length;
+    return row(i.id, i.label, i.estimatedTokens, kids, undefined, i.unavailable) +
+      (kids && state.open[i.id] ? `<div class="children">${i.children.map(item).join('')}</div>` : '');
+  }
+
+  function row(id, label, tokens, expandable, color, dim) {
+    const chev = expandable ? (state.open[id] ? '▾' : '▸') : '';
+    return `<div class="row${state.selected === id ? ' selected' : ''}${dim ? ' dim' : ''}" data-id="${esc(id)}">` +
+      `<span class="chev" data-toggle="${esc(id)}">${chev}</span>` +
+      (color ? `<span class="sw" style="background:${color}"></span>` : '') +
+      `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
+      `<span class="tok">${tokens === undefined ? '' : fmt(tokens)}</span></div>`;
+  }
+
+  $('cats').addEventListener('click', (e) => {
+    const r = e.target.closest('.row'); if (!r) return;
+    const id = r.dataset.id;
+    // Chevron or a second click toggles; first click on a category also expands it.
+    if ((e.target.dataset.toggle !== undefined && e.target.textContent) || state.selected === id) state.open[id] = !state.open[id];
+    else if (id.startsWith('category:')) state.open[id] = true;
+    select(id);
+  });
+
+  function select(id, quiet) {
+    state.selected = id; save(); render();
+    if (!quiet) { $('vt').textContent = 'Loading…'; }
+    vscode.postMessage({ type: 'text', id });
+  }
+
+  function showText(m) {
+    currentText = m.text;
+    $('vt').textContent = m.label;
+    $('vm').textContent = `${m.estimatedTokens !== undefined ? '~' + fmt(m.estimatedTokens) + ' tokens · ' : ''}${m.text.length.toLocaleString()} chars`;
+    $('copy').disabled = $('open').disabled = false;
+    paint();
+  }
+
+  function paint() {
+    const q = $('find').value;
+    const shown = currentText.length > 400000 ? currentText.slice(0, 400000) + '\n\n… (truncated in this view — use "Open in editor" for the full text)' : currentText;
+    if (!q) { $('text').textContent = shown; return; }
+    const parts = shown.split(q);
+    $('text').innerHTML = parts.map(esc).join(`<mark>${esc(q)}</mark>`);
+    const first = $('text').querySelector('mark'); if (first) first.scrollIntoView({ block: 'center' });
+  }
+
+  $('find').addEventListener('input', paint);
+  $('copy').addEventListener('click', () => vscode.postMessage({ type: 'copy', id: state.selected }));
+  $('open').addEventListener('click', () => vscode.postMessage({ type: 'openEditor', id: state.selected }));
+  $('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
+  $('follow').addEventListener('change', (e) => vscode.postMessage({ type: 'follow', value: e.target.checked }));
+  $('chat').addEventListener('change', (e) => { state.selected = undefined; state.open = {}; save(); vscode.postMessage({ type: 'selectChat', chatId: e.target.value }); });
+  vscode.postMessage({ type: 'ready' });
+</script>
+</body>
+</html>

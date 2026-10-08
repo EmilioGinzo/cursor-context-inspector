@@ -81,6 +81,9 @@ function recordChat(db, composerId, dir) {
       ? composer.workspaceIdentifier.configPath.fsPath
       : composer.workspaceIdentifier && composer.workspaceIdentifier.uri && composer.workspaceIdentifier.uri.fsPath,
     createdAt: composer.createdAt,
+    parentComposerId: composer.subagentInfo && composer.subagentInfo.parentComposerId,
+    subagentType: composer.subagentInfo && composer.subagentInfo.subagentTypeName,
+    subagentIds: composer.subagentComposerIds || [],
     lastUpdatedAt: composer.lastUpdatedAt,
     totalUsedTokens: snapshot.totalUsedTokens,
     snapshots: (meta.snapshots || 0) + 1,
@@ -115,8 +118,8 @@ function writeIndex(dir) {
     ? fs.readdirSync(chatsDir).map((id) => readJson(path.join(chatsDir, id, 'meta.json'), undefined)).filter(Boolean)
     : [];
   chats.sort((a, b) => (b.lastUpdatedAt || 0) - (a.lastUpdatedAt || 0));
-  const index = chats.map(({ composerId, name, model, workspace, lastUpdatedAt, totalUsedTokens, snapshots, seen }) => ({
-    composerId, name, model, workspace, lastUpdatedAt, totalUsedTokens, snapshots, messages: seen.length,
+  const index = chats.map(({ composerId, name, model, workspace, parentComposerId, lastUpdatedAt, totalUsedTokens, snapshots, seen }) => ({
+    composerId, name, model, workspace, parentComposerId, lastUpdatedAt, totalUsedTokens, snapshots, messages: seen.length,
   }));
   writeAtomic(path.join(dir, 'index.json'), JSON.stringify(index, null, 2));
 }

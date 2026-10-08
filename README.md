@@ -14,6 +14,12 @@ text itself. This extension shows the exact text behind each row.
 - Click a category or item to see its text on the right. **Find**, **Copy** and
   **Open in editor** work on whatever is selected.
 - **All prompt messages (raw)** lists every message exactly as stored.
+- **Subagents**: a chat that spawned subagents lists them (name, type, context
+  used). Click one to open its own context breakdown; the breadcrumb above the
+  card leads back to the parent. In the conversation, the tool call/result that
+  spawned a subagent has a **↗** badge that opens it (messages that spawned
+  several show **↗ N subagents**). Nested subagents work the same way.
+  Subagent chats are left out of the chat dropdown.
 - With **Follow the focused chat** on, the view tracks the chat focused in this
   window (Cursor's pane list plus the window's focus history) and refreshes as
   it changes; it falls back to the most recently active chat. Pick any other

@@ -168,6 +168,7 @@ class Inspector {
         case 'refresh':
           return this.reload();
         case 'selectChat':
+        case 'openChat': // a subagent, or an ancestor from the breadcrumb
           this.chatId = m.chatId;
           this.follow = false;
           return this.reload();
@@ -227,7 +228,7 @@ class Inspector {
       const ctx = store.loadContext(db, this.chatId);
       this.loadedAt = ctx.lastUpdatedAt;
       this.index(ctx);
-      this.post({ type: 'context', chats, follow: this.follow, context: skeleton(ctx) });
+      this.post({ type: 'context', chats, follow: this.follow, context: { ...skeleton(ctx), ancestors: store.ancestors(db, this.chatId) } });
     } catch (err) {
       this.post({ type: 'error', message: `${err.message}\n\nDatabase: ${this.dbPath}` });
     }
@@ -275,6 +276,7 @@ function skeleton(ctx) {
     characterCount: i.characterCount,
     unavailable: i.text === undefined && !i.children,
     untracked: i.untracked,
+    subagents: i.subagents,
     children: i.children && i.children.map(strip),
   });
   return {
@@ -286,6 +288,8 @@ function skeleton(ctx) {
     maxTokens: ctx.maxTokens,
     categories: ctx.categories.map((c) => ({ ...c, items: c.items.map(strip) })),
     rawMessages: ctx.rawMessages.map(strip),
+    subagents: ctx.subagents,
+    parent: ctx.parent,
   };
 }
 

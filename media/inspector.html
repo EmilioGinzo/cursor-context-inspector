@@ -37,6 +37,21 @@
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .tok { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
   .row.dim .name { opacity: .6; }
+  .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 2px 8px; font-size: 12px; }
+  .crumbs:empty { display: none; }
+  .crumb { color: var(--vscode-textLink-foreground); cursor: pointer; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb:hover { text-decoration: underline; }
+  .crumb.current { color: var(--vscode-foreground); cursor: default; font-weight: 600; }
+  .crumb.current:hover { text-decoration: none; }
+  .crumb-sep { color: var(--vscode-descriptionForeground); }
+  .row.sub-head .name { font-weight: 600; }
+  .row.sub .chev { color: var(--vscode-textLink-foreground); }
+  .sub-list { border-left-color: color-mix(in srgb, var(--vscode-textLink-foreground) 45%, transparent); }
+  .row .type { font-size: 10px; padding: 0 5px; border-radius: 3px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
+  .row { min-width: 0; }
+  .row .sub-badge, .row .type, .row .untracked { flex: none; }
+  .row .sub-badge { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--vscode-textLink-foreground); color: var(--vscode-textLink-foreground); white-space: nowrap; cursor: pointer; }
+  .row .sub-badge:hover { background: color-mix(in srgb, var(--vscode-textLink-foreground) 20%, transparent); }
   .row .untracked { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--vscode-editorWarning-foreground, #cca700); color: var(--vscode-editorWarning-foreground, #cca700); white-space: nowrap; }
   .children { margin-left: 11px; padding-left: 6px; border-left: 2px solid color-mix(in srgb, var(--cat) 45%, transparent); }
   .sep { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
@@ -91,8 +106,9 @@
       <button id="refresh" title="Refresh">↻</button>
     </div>
     <div class="toolbar"><label class="follow"><input type="checkbox" id="follow"> Follow the focused chat</label></div>
+    <div class="crumbs" id="crumbs"></div>
     <div class="card">
-      <div class="title">Context Usage</div>
+      <div class="title" id="title">Context Usage</div>
       <div class="summary"><span id="pct"></span><span id="tot"></span></div>
       <div class="bar" id="bar"></div>
       <div class="meta" id="meta"></div>
@@ -132,9 +148,10 @@
 
   function renderChats(chats) {
     const sel = $('chat');
-    if (!chats.some((c) => c.id === ctx.composerId)) chats = [{ id: ctx.composerId, name: ctx.name, used: ctx.totalUsedTokens }, ...chats];
+    const root = ctx.ancestors.length ? ctx.ancestors[0] : { composerId: ctx.composerId, name: ctx.name };
+    if (!chats.some((c) => c.id === root.composerId)) chats = [{ id: root.composerId, name: root.name, used: root.composerId === ctx.composerId ? ctx.totalUsedTokens : undefined }, ...chats];
     sel.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.name || 'Untitled chat')} — ${fmt(c.used)} tok${c.lastUpdatedAt ? ' · ' + new Date(c.lastUpdatedAt).toLocaleString() : ''}</option>`).join('');
-    sel.value = ctx.composerId;
+    sel.value = root.composerId;
   }
 
   function render() {
@@ -145,9 +162,42 @@
     bar.innerHTML = ctx.categories.filter((c) => c.estimatedTokens > 0).map((c) => `<div class="c-${c.id}" data-tokens="${c.estimatedTokens}" title="${esc(c.label)}: ${fmt(c.estimatedTokens)}"></div>`).join('');
     for (const seg of bar.children) seg.style.width = `${ctx.maxTokens ? (seg.dataset.tokens / ctx.maxTokens) * 100 : 0}%`;
     $('meta').textContent = `${ctx.model || ''} · ${ctx.hasTree ? 'item spans from Cursor’s usage tree' : 'items parsed from the stored prompt'}`;
+    renderCrumbs();
     const cats = ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
     $('cats').innerHTML = cats.map((c) => category(c.id, c.label, c.estimatedTokens, c.items)).join('') +
+      subagentSection() +
       '<div class="sep"></div>' + category('raw', 'All prompt messages (raw)', undefined, ctx.rawMessages);
+  }
+
+  // Breadcrumb: root chat › … › current subagent. Each ancestor opens its own context.
+  function renderCrumbs() {
+    const chain = ctx.ancestors || [];
+    $('crumbs').innerHTML = chain.length
+      ? chain.map((a) => `<a class="crumb" data-chat="${esc(a.composerId)}" title="Open this chat’s context">${esc(a.name)}</a><span class="crumb-sep">›</span>`).join('') +
+        `<span class="crumb current">${esc(ctx.name)}</span>`
+      : '';
+    $('title').textContent = ctx.parent ? `Context Usage — subagent${ctx.parent.type ? ` (${ctx.parent.type})` : ''}` : 'Context Usage';
+  }
+
+  function subagentSection() {
+    const subs = ctx.subagents || [];
+    if (!subs.length) return '';
+    const key = 'subagents-list';
+    const open = state.open[key] !== false;
+    return '<div class="sep"></div>' +
+      `<div class="row sub-head" data-toggle-only="${key}"><span class="chev">${open ? '▾' : '▸'}</span>` +
+      `<span class="name">Subagents</span><span class="tok">${subs.length}</span></div>` +
+      (open ? `<div class="children sub-list">${subs.map(subRow).join('')}</div>` : '');
+  }
+
+  function subRow(s) {
+    const pct = s.max ? ` · ${Math.round((s.used / s.max) * 100)}%` : '';
+    return `<div class="row sub${s.hasContext ? '' : ' dim'}" data-chat="${esc(s.composerId)}" title="${s.hasContext ? 'Open this subagent’s context' : 'No context saved for this subagent'}">` +
+      '<span class="chev">↗</span>' +
+      `<span class="name">${esc(s.name || 'Untitled subagent')}</span>` +
+      (s.type ? `<span class="type">${esc(s.type)}</span>` : '') +
+      (s.nested ? `<span class="type" title="Has its own subagents">+${s.nested}</span>` : '') +
+      `<span class="tok">${s.used ? fmt(s.used) + pct : ''}</span></div>`;
   }
 
   function category(id, label, tokens, items) {
@@ -158,21 +208,47 @@
 
   function item(i) {
     const kids = i.children && i.children.length;
-    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable, i.untracked) +
+    const subs = i.subagents || [];
+    const subsKey = `subs:${i.id}`;
+    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable, i.untracked, subs, subsKey) +
+      (subs.length > 1 && state.open[subsKey] ? `<div class="children sub-list">${subs.map((s) => subRow(ctx.subagents.find((x) => x.composerId === s.composerId) || s)).join('')}</div>` : '') +
       (kids && state.open[i.id] ? `<div class="children">${i.children.map(item).join('')}</div>` : '');
   }
 
-  function row(id, label, tokens, expandable, swatch, dim, untracked) {
+  function row(id, label, tokens, expandable, swatch, dim, untracked, subagents = [], subsKey) {
     const chev = expandable ? (state.open[id] ? '▾' : '▸') : '';
     return `<div class="row${state.selected === id ? ' selected' : ''}${dim ? ' dim' : ''}" data-id="${esc(id)}">` +
       `<span class="chev" data-toggle="1">${chev}</span>` +
       (swatch ? '<span class="sw"></span>' : '') +
       `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
+      (subagents.length === 1
+        ? `<span class="sub-badge" data-chat="${esc(subagents[0].composerId)}" title="Open subagent: ${esc(subagents[0].name || '')}">↗ ${esc(shorten(subagents[0].name || 'subagent', 18))}</span>`
+        : subagents.length > 1
+          ? `<span class="sub-badge" data-toggle-only="${esc(subsKey)}" title="Spawned ${subagents.length} subagents — click to list them">↗ ${subagents.length} subagents ${state.open[subsKey] ? '▾' : '▸'}</span>`
+          : '') +
       (untracked ? '<span class="untracked" title="Not in Cursor’s usage breakdown: the model received this text, but Cursor did not attribute it to a category. Token count is an estimate.">not counted</span>' : '') +
       `<span class="tok">${tokens === undefined ? '' : fmt(tokens)}</span></div>`;
   }
 
+  const shorten = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+  function openChat(chatId) {
+    state.selected = undefined; state.open = {}; save();
+    vscode.postMessage({ type: 'openChat', chatId });
+  }
+
+  $('crumbs').addEventListener('click', (e) => { const a = e.target.closest('[data-chat]'); if (a) openChat(a.dataset.chat); });
+
   $('cats').addEventListener('click', (e) => {
+    const chat = e.target.closest('[data-chat]');
+    if (chat) { if (!chat.classList.contains('dim')) openChat(chat.dataset.chat); return; }
+    const only = e.target.closest('[data-toggle-only]');
+    if (only) {
+      const k = only.dataset.toggleOnly;
+      // The Subagents section starts open; per-item subagent lists start closed.
+      state.open[k] = k === 'subagents-list' ? state.open[k] === false : !state.open[k];
+      save(); render(); return;
+    }
     const r = e.target.closest('.row'); if (!r) return;
     const id = r.dataset.id;
     // Chevron or a second click toggles; first click on a category also expands it.

@@ -54,45 +54,32 @@
   .empty { color: var(--vscode-descriptionForeground); padding: 24px; }
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
 
-  /* Raw view */
-  pre.raw { margin: 0; padding: 14px 16px; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
-
-  /* Formatted view */
-  .doc { padding: 14px 18px 40px; line-height: 1.55; max-width: 980px; }
-  .doc details.tag { margin: 8px 0; border: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--accent, var(--cat, var(--vscode-textLink-foreground))); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 70%, transparent); }
-  .doc details.tag > summary { cursor: pointer; padding: 6px 10px; display: flex; gap: 8px; align-items: baseline; list-style: none; user-select: none; }
-  .doc details.tag > summary::-webkit-details-marker { display: none; }
-  .doc details.tag > summary::before { content: '▸'; font-size: 10px; color: var(--vscode-descriptionForeground); width: 10px; }
-  .doc details.tag[open] > summary::before { content: '▾'; }
-  .doc details.tag[open] > summary { border-bottom: 1px solid var(--vscode-panel-border); }
-  .doc .tagname { font-family: var(--vscode-editor-font-family); font-size: 11px; color: var(--vscode-descriptionForeground); }
-  .doc .tagtitle { font-weight: 600; }
-  .doc .tagtitle .dir { font-weight: 400; color: var(--vscode-descriptionForeground); }
-  .doc .tagattrs { font-size: 11px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  .doc .tagsize { font-size: 11px; color: var(--vscode-descriptionForeground); margin-left: auto; white-space: nowrap; }
-  .doc .tagbody { padding: 4px 14px 8px; }
-  .doc details.tag details.tag { --accent: #a3d97a; }
-  .doc details.tag details.tag details.tag { --accent: #f5d76e; }
-  .doc details.tag details.tag details.tag details.tag { --accent: #f5a56e; }
-  .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 { margin: 14px 0 6px; line-height: 1.3; }
-  .doc h1 { font-size: 1.45em; } .doc h2 { font-size: 1.25em; } .doc h3 { font-size: 1.1em; } .doc h4, .doc h5, .doc h6 { font-size: 1em; }
-  .doc h1, .doc h2 { padding-bottom: 4px; border-bottom: 1px solid var(--vscode-panel-border); }
-  .doc p { margin: 6px 0; }
-  .doc ul, .doc ol { margin: 4px 0 8px; padding-left: 22px; }
-  .doc li { margin: 2px 0; }
-  .doc blockquote { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--vscode-textBlockQuote-border, #555); color: var(--vscode-descriptionForeground); }
-  .doc code { font-family: var(--vscode-editor-font-family); font-size: .92em; background: var(--vscode-textCodeBlock-background, #ffffff14); padding: 1px 4px; border-radius: 3px; }
-  .doc pre.code { margin: 8px 0; padding: 10px 12px; overflow-x: auto; background: var(--vscode-textCodeBlock-background, #ffffff10); border-radius: 6px; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
-  .doc pre.code code { background: none; padding: 0; }
-  .doc table { border-collapse: collapse; margin: 8px 0; font-size: .95em; }
-  .doc th, .doc td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; vertical-align: top; }
-  .doc th { background: var(--vscode-editorWidget-background); }
-  .doc hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 12px 0; }
-  .doc .label { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--vscode-descriptionForeground); margin: 10px 0 2px; }
-  .doc .divider { margin: 18px 0 6px; padding: 4px 0; font-weight: 600; border-bottom: 1px solid var(--vscode-panel-border); display: flex; justify-content: space-between; }
-  .doc .divider span { font-weight: 400; color: var(--vscode-descriptionForeground); }
-  .j-key { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); } .j-str { color: var(--vscode-debugTokenExpression-string, #ce9178); }
-  .j-num { color: var(--vscode-debugTokenExpression-number, #b5cea8); } .j-lit { color: var(--vscode-debugTokenExpression-boolean, #569cd6); }
+  /* Text view: the exact characters, colored, with nested tag contents indented visually. */
+  .code { padding: 12px 0 40px; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); line-height: 1.5; }
+  .ln { white-space: pre-wrap; word-break: break-word; padding-right: 16px; min-height: 1.5em; }
+  .ln:hover { background: var(--vscode-editor-lineHighlightBackground, #ffffff08); }
+  .code .d0 { padding-left: 16px; }
+  .code.indent .d1 { padding-left: 34px; } .code.indent .d2 { padding-left: 52px; } .code.indent .d3 { padding-left: 70px; }
+  .code.indent .d4 { padding-left: 88px; } .code.indent .d5 { padding-left: 106px; } .code.indent .d6 { padding-left: 124px; }
+  .code.indent .d7 { padding-left: 142px; } .code.indent .d8 { padding-left: 160px; }
+  .code:not(.indent) .ln { padding-left: 16px; }
+  .t-punct { color: #808080; }
+  .t-tag { color: var(--vscode-debugTokenExpression-name, #569cd6); }
+  .t-attr { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); }
+  .t-val { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+  .t-h { color: #e5c07b; font-weight: 600; }
+  .t-bullet { color: #c678dd; }
+  .t-strong { font-weight: 600; color: #e6e6e6; }
+  .t-em { font-style: italic; }
+  .t-code { color: #98c379; }
+  .t-fence { color: #7f848e; }
+  .t-quote { color: #7f848e; font-style: italic; }
+  .t-link { color: var(--vscode-textLink-foreground); }
+  .t-label { color: #c678dd; font-weight: 600; }
+  .t-divider { color: #e5c07b; font-weight: 600; }
+  .t-key { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); } .t-str { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+  .t-num { color: var(--vscode-debugTokenExpression-number, #b5cea8); } .t-lit { color: var(--vscode-debugTokenExpression-boolean, #569cd6); }
+  .t-table { color: #7f848e; }
 </style>
 </head>
 <body>
@@ -116,7 +103,7 @@
     <div class="viewer-head">
       <span class="vt" id="vt">Select a category or item</span>
       <span class="vm" id="vm"></span>
-      <div class="seg"><button id="fmt" class="on">Formatted</button><button id="raw">Raw</button></div>
+      <button id="indent" class="on" title="Indent the contents of nested tags (display only; copy keeps the original text)">Indent</button>
       <input class="find" id="find" placeholder="Find (Enter = next)">
       <button id="copy" disabled>Copy</button>
       <button id="open" disabled>Open in editor</button>
@@ -127,18 +114,15 @@
 <script nonce="{{nonce}}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const state = Object.assign({ open: {}, selected: undefined, mode: 'formatted' }, vscode.getState() || {});
-  const MAX_FORMATTED = 250000, MAX_RAW = 400000;
-  let ctx, currentText = '', currentKind = '', currentCat = '', findIndex = 0;
+  const state = Object.assign({ open: {}, selected: undefined, indent: true }, vscode.getState() || {});
+    let ctx, currentText = '', currentKind = '', findIndex = 0;
 
   const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n ?? 0));
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const save = () => vscode.setState(state);
 
   window.addEventListener('message', ({ data: m }) => {
-    if (m.type === 'context') { $('err').textContent = ''; ctx = m.context; renderChats(m.chats); $('follow').checked = m.follow;
-      if (m.focusCategory) { const key = `category:${m.focusCategory}`; state.open[key] = true; state.selected = key; }
-      render(); if (state.selected) select(state.selected, !m.focusCategory); }
+    if (m.type === 'context') { $('err').textContent = ''; ctx = m.context; renderChats(m.chats); $('follow').checked = m.follow; render(); if (state.selected) select(state.selected, true); }
     else if (m.type === 'text' && m.id === state.selected) showText(m);
     else if (m.type === 'error') $('err').textContent = m.message;
   });
@@ -197,13 +181,14 @@
 
   function select(id, quiet) {
     state.selected = id; save(); render();
-    const cat = document.querySelector(`.row[data-id="${CSS.escape(id)}"]`)?.closest('[class^="c-"]');
-    currentCat = cat ? cat.className : '';
     if (!quiet) $('vt').textContent = 'Loading…';
     vscode.postMessage({ type: 'text', id });
   }
 
   // ---- right: viewer ------------------------------------------------------------
+
+  const MAX_HIGHLIGHT = 300000, MAX_SHOWN = 1500000;
+  let lines = []; // [{ depth, tokens: [[cls, text]] }]
 
   function showText(m) {
     currentText = m.text;
@@ -215,56 +200,116 @@
   }
 
   function paint() {
+    $('indent').classList.toggle('on', state.indent !== false);
+    let text = currentText;
+    const truncated = text.length > MAX_SHOWN;
+    if (truncated) text = text.slice(0, MAX_SHOWN);
+    lines = text.length > MAX_HIGHLIGHT ? text.split('\n').map((t) => ({ depth: 0, tokens: [['', t]] })) : tokenize(text, currentKind);
+    if (truncated) lines.push({ depth: 0, tokens: [['t-label', '… truncated here — use "Open in editor" for the full text']] });
     const view = $('view');
-    $('fmt').classList.toggle('on', state.mode === 'formatted');
-    $('raw').classList.toggle('on', state.mode === 'raw');
-    if (state.mode === 'raw' || currentText.length > MAX_FORMATTED) {
-      const shown = currentText.length > MAX_RAW ? currentText.slice(0, MAX_RAW) + '\n\n… (truncated here — use "Open in editor" for the full text)' : currentText;
-      view.innerHTML = `<pre class="raw">${esc(shown)}</pre>`;
-    } else {
-      view.innerHTML = `<div class="doc ${currentCat}">${formatDocument(currentText, currentKind)}</div>`;
-    }
+    view.innerHTML = `<div class="code${state.indent !== false ? ' indent' : ''}">${lines.map((l, i) => lineHtml(l, i)).join('')}</div>`;
     view.scrollTop = 0;
     highlight();
   }
 
-  // ---- formatter: XML-ish sections -> collapsible boxes, markdown, JSON -----
+  function lineHtml(line, i, ranges) {
+    const d = Math.min(line.depth, 8);
+    let body = '';
+    if (!ranges) body = line.tokens.map(([c, t]) => (c ? `<span class="${c}">${esc(t)}</span>` : esc(t))).join('');
+    else {
+      // Split tokens at match boundaries so a match may span several colored tokens.
+      let pos = 0;
+      for (const [c, t] of line.tokens) {
+        let k = 0;
+        while (k < t.length) {
+          const at = pos + k;
+          const r = ranges.find(([s, e]) => at >= s && at < e);
+          const next = r ? Math.min(r[1], pos + t.length) : Math.min(pos + t.length, ...ranges.map(([s]) => s).filter((s) => s > at));
+          const piece = esc(t.slice(k, next - pos));
+          const span = c ? `<span class="${c}">${piece}</span>` : piece;
+          body += r ? `<mark data-r="${r[0]}">${span}</mark>` : span;
+          k = next - pos;
+        }
+        pos += t.length;
+      }
+    }
+    return `<div class="ln d${d}" data-i="${i}">${body || '​'}</div>`;
+  }
 
-  const OPEN_RE = /<([a-zA-Z][\w-]*)((?:\s+[\w:-]+="[^"]*")*)\s*>/g;
-  const DIVIDER_RE = /^===== (.*?) =====$/;
+  // ---- tokenizer: exact text, tagged with classes -----------------------------
+
+  const TAG_RE = /<\/?[A-Za-z][\w:.-]*(?:\s+[\w:.-]+(?:="[^"]*")?)*\s*\/?>/g;
   const LABEL_RE = /^\[(reasoning|tool call: [^\]]+|tool result: [^\]]+|image)\]$/;
 
-  function formatDocument(text, kind) {
+  function tokenize(text, kind) {
+    const raw = text.split('\n');
     const trimmed = text.trim();
-    if (/^[\[{]/.test(trimmed)) {
-      try { return jsonBlock(JSON.parse(trimmed)); } catch {}
+    let wholeJson = kind === 'tool_call' || kind === 'tool_result';
+    if (!wholeJson && /^[\[{]/.test(trimmed)) { try { JSON.parse(trimmed); wholeJson = true; } catch {} }
+    if (wholeJson) return raw.map((l) => ({ depth: 0, tokens: jsonTokens(l) }));
+
+    const opens = structuralOpens(text);
+    const out = [];
+    let depth = 0, offset = 0, mode = 'text', fence = '';
+    for (const line of raw) {
+      const t = line.trim();
+      let d = depth, tokens;
+      if (mode === 'fence') {
+        if (t.startsWith(fence)) { mode = 'text'; tokens = [['t-fence', line]]; }
+        else tokens = fenceLang === 'json' ? jsonTokens(line) : [['t-code', line]];
+      } else if (mode === 'payload' && !LABEL_RE.test(t)) {
+        tokens = jsonTokens(line);
+      } else {
+        if (mode === 'payload') mode = 'text';
+        const f = t.match(/^(```+|~~~+)\s*([\w+-]*)/);
+        if (f) { mode = 'fence'; fence = f[1]; fenceLang = f[2].toLowerCase(); tokens = [['t-fence', line]]; }
+        else if (LABEL_RE.test(t)) { tokens = [['t-label', line]]; if (/^\[tool (call|result)/.test(t)) mode = 'payload'; }
+        else if (/^===== .* =====$/.test(t)) { tokens = [['t-divider', line]]; d = 0; }
+        else {
+          // Indent: a line starting with a matched close tag sits at the outer depth.
+          if (/^<\//.test(t)) d = Math.max(0, depth - countLeadingCloses(t));
+          tokens = mdTokens(line);
+        }
+      }
+      out.push({ depth: d, tokens });
+      // Depth after this line: matched opens on it minus closes on it.
+      if (mode === 'text' || tokens[0][0] === 't-fence') {
+        const lineEnd = offset + line.length;
+        let delta = 0;
+        for (const o of opens) {
+          if (o.start >= offset && o.start < lineEnd) delta++;
+          if (o.close >= offset && o.close < lineEnd) delta--;
+        }
+        depth = Math.max(0, depth + delta);
+      }
+      offset += line.length + 1;
     }
-    if (kind === 'tool_call' || kind === 'tool_result') return codeBlock(text, 'json?');
-    return renderSegments(text, 0);
+    return out;
+  }
+  let fenceLang = '';
+
+  function countLeadingCloses(t) {
+    const m = t.match(/^(?:<\/[\w:.-]+>\s*)+/);
+    return m ? (m[0].match(/<\//g) || []).length : 0;
   }
 
-  // Splits text into structural tags (with a matching close) and prose.
-  function renderSegments(text, depth) {
-    let out = '', pos = 0, m;
-    OPEN_RE.lastIndex = 0;
-    while ((m = OPEN_RE.exec(text))) {
-      const close = `</${m[1]}>`;
-      const end = findClose(text, m[1], OPEN_RE.lastIndex);
-      if (end === -1 || insideCode(text, m.index)) continue;
-      out += prose(text.slice(pos, m.index));
-      const body = text.slice(OPEN_RE.lastIndex, end);
-      out += tagBox(m[1], parseAttrs(m[2]), body, depth);
-      pos = end + close.length;
-      OPEN_RE.lastIndex = pos;
+  // Open tags (at line start) that have a matching close: these drive indentation.
+  function structuralOpens(text) {
+    const res = [];
+    const re = /^[ \t]*<([A-Za-z][\w:.-]*)(?:\s[^>]*)?>/gm;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m[0].endsWith('/>')) continue;
+      const close = findClose(text, m[1], re.lastIndex);
+      if (close !== -1 && text.slice(re.lastIndex, close).includes('\n')) res.push({ start: m.index, close });
     }
-    return out + prose(text.slice(pos));
+    return res;
   }
 
-  // Matching close tag, accounting for nested tags of the same name.
   function findClose(text, name, from) {
-    const open = new RegExp(`<${name}(?:\\s[^>]*)?>`, 'g'), closeTag = `</${name}>`;
+    const open = new RegExp(`<${name.replace(/[.]/g, '\\.')}(?:\\s[^>]*)?>`, 'g'), closeTag = `</${name}>`;
     let depth = 1, i = from;
-    for (;;) {
+    for (let guard = 0; guard < 10000; guard++) {
       const c = text.indexOf(closeTag, i);
       if (c === -1) return -1;
       open.lastIndex = i;
@@ -273,220 +318,119 @@
       if (--depth === 0) return c;
       i = c + closeTag.length;
     }
+    return -1;
   }
 
-  function insideCode(text, index) {
-    const before = text.slice(Math.max(0, index - 2000), index);
-    const fences = (before.match(/^```/gm) || []).length;
-    const line = before.slice(before.lastIndexOf('\n') + 1);
-    return fences % 2 === 1 || (line.split('`').length - 1) % 2 === 1;
+  // Markdown + inline XML tags on one line; returns tokens whose texts concatenate to the line.
+  function mdTokens(line) {
+    const toks = [];
+    let rest = line;
+    const lead = rest.match(/^(\s*)(#{1,6}\s.*)$/);
+    if (lead) return pushInline(lead[1] ? [['', lead[1]]] : [], lead[2], 't-h');
+    const quote = rest.match(/^(\s*>+\s?)(.*)$/);
+    if (quote && !/^\s*>\s*$/.test(rest) && !/^\s*<|^\s*>[^ ]/.test(rest)) return pushInline([['t-quote', quote[1]]], quote[2], 't-quote');
+    const bullet = rest.match(/^(\s*)([-*+]|\d+[.)])(\s+)/);
+    if (bullet) { toks.push(['', bullet[1]], ['t-bullet', bullet[2]], ['', bullet[3]]); rest = rest.slice(bullet[0].length); }
+    if (/^\s*\|.*\|\s*$/.test(line)) return inlineTokens(rest, toks, '', /\|/g);
+    return inlineTokens(rest, toks, '');
   }
 
-  function parseAttrs(s) {
-    const attrs = [];
-    s.replace(/([\w:-]+)="([^"]*)"/g, (_, k, v) => attrs.push([k, v]));
-    return attrs;
-  }
+  function pushInline(toks, text, base) { return inlineTokens(text, toks, base); }
 
-  function tagBox(name, attrs, body, depth) {
-    const titleAttr = attrs.find(([k]) => ['fullPath', 'name', 'path', 'id', 'title'].includes(k));
-    let title = '';
-    if (titleAttr) {
-      const v = titleAttr[1], slash = v.lastIndexOf('/');
-      title = slash > 0 && slash < v.length - 1 ? `<span class="dir">${esc(v.slice(0, slash + 1))}</span>${esc(v.slice(slash + 1))}` : esc(v);
+  const INLINE_RE = /(`[^`]+`)|(<\/?[A-Za-z][\w:.-]*(?:\s+[\w:.-]+(?:="[^"]*")?)*\s*\/?>)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)\s]+\))|(https?:\/\/[^\s)>"]+)/g;
+
+  function inlineTokens(text, toks, base, pipeRe) {
+    let pos = 0, m;
+    INLINE_RE.lastIndex = 0;
+    const plain = (s) => {
+      if (!s) return;
+      if (pipeRe) s.split(/(\|)/).forEach((p) => p && toks.push([p === '|' ? 't-table' : base, p]));
+      else toks.push([base, s]);
+    };
+    while ((m = INLINE_RE.exec(text))) {
+      plain(text.slice(pos, m.index));
+      if (m[1]) toks.push(['t-code', m[1]]);
+      else if (m[2]) tagTokens(m[2], toks);
+      else if (m[3]) toks.push(['t-strong', m[3]]);
+      else toks.push(['t-link', m[0]]);
+      pos = INLINE_RE.lastIndex;
     }
-    const rest = attrs.filter((a) => a !== titleAttr).map(([k, v]) => `${k}="${v}"`).join(' ');
-    const big = body.length > 20000 && depth > 0;
-    return `<details class="tag"${big ? '' : ' open'}><summary>` +
-      `<span class="tagname">&lt;${esc(name)}&gt;</span>` +
-      (title ? `<span class="tagtitle">${title}</span>` : '') +
-      (rest ? `<span class="tagattrs" title="${esc(rest)}">${esc(rest)}</span>` : '') +
-      `<span class="tagsize">${fmt(Math.ceil(body.length / 4))} tok</span>` +
-      `</summary><div class="tagbody">${renderSegments(body, depth + 1)}</div></details>`;
+    plain(text.slice(pos));
+    return toks.length ? toks : [['', '']];
   }
 
-  function prose(text) {
-    if (!text.trim()) return '';
-    const lines = text.replace(/\r/g, '').split('\n');
-    let html = '', i = 0;
-    while (i < lines.length) {
-      const line = lines[i];
-      const fence = line.match(/^\s*(```+|~~~+)\s*([\w+-]*)/);
-      if (fence) {
-        const buf = [];
-        i++;
-        while (i < lines.length && !lines[i].trim().startsWith(fence[1])) buf.push(lines[i++]);
-        i++;
-        html += codeBlock(buf.join('\n'), fence[2]);
-        continue;
-      }
-      const div = line.match(DIVIDER_RE);
-      if (div) {
-        const t = div[1].match(/^(.*?)\s*(\(~.*\))?$/);
-        html += `<div class="divider">${esc(t[1])}<span>${esc(t[2] || '')}</span></div>`;
-        i++; continue;
-      }
-      if (!line.trim()) { i++; continue; }
-      const h = line.match(/^(#{1,6})\s+(.*)$/);
-      if (h) { html += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; i++; continue; }
-      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { html += '<hr>'; i++; continue; }
-      const lbl = line.match(LABEL_RE);
-      if (lbl) {
-        html += `<div class="label">${esc(lbl[1])}</div>`;
-        i++;
-        if (/^tool (call|result)/.test(lbl[1])) {
-          // Tool payloads are data, not prose: show them verbatim up to the next label.
-          const buf = [];
-          while (i < lines.length && !LABEL_RE.test(lines[i])) buf.push(lines[i++]);
-          html += codeBlock(buf.join('\n').replace(/^\n+|\n+$/g, ''), 'json?');
-        }
-        continue;
-      }
-      if (/^\s*[\[{]\s*$/.test(line)) {
-        const json = jsonSpan(lines, i);
-        if (json) { html += jsonBlock(json.value); i = json.next; continue; }
-      }
-      if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
-        const rows = [];
-        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
-        html += table(rows);
-        continue;
-      }
-      if (/^\s*>/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
-        html += `<blockquote>${prose(buf.join('\n'))}</blockquote>`;
-        continue;
-      }
-      if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
-        const { html: list, next } = listBlock(lines, i);
-        html += list; i = next; continue;
-      }
-      const buf = [];
-      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|\s*```|\s*~~~|\s*>|\s*([-*+]|\d+[.)])\s+|\s*\|.*\|\s*$|===== )/.test(lines[i])) buf.push(lines[i++]);
-      if (!buf.length) buf.push(lines[i++]);
-      html += `<p>${buf.map(inline).join('<br>')}</p>`;
+  function tagTokens(tag, toks) {
+    const m = tag.match(/^(<\/?)([A-Za-z][\w:.-]*)([\s\S]*?)(\/?>)$/);
+    toks.push(['t-punct', m[1]], ['t-tag', m[2]]);
+    const rest = m[3];
+    const ATTR = /(\s+)([\w:.-]+)(?:(=)("[^"]*"))?/y;
+    let a, end = 0; // a failed sticky exec resets lastIndex, so track the end ourselves
+    while ((a = ATTR.exec(rest))) {
+      toks.push(['', a[1]], ['t-attr', a[2]]);
+      if (a[3]) toks.push(['t-punct', a[3]], ['t-val', a[4]]);
+      end = ATTR.lastIndex;
     }
-    return html;
+    if (end < rest.length) toks.push(['', rest.slice(end)]);
+    toks.push(['t-punct', m[4]]);
   }
 
-  function listBlock(lines, i) {
-    const indentOf = (l) => l.match(/^\s*/)[0].length;
-    const base = indentOf(lines[i]);
-    const ordered = /^\s*\d+[.)]/.test(lines[i]);
-    let html = ordered ? '<ol>' : '<ul>';
-    while (i < lines.length) {
-      const l = lines[i];
-      const m = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
-      if (m && m[1].length === base) {
-        let content = inline(m[3]);
-        i++;
-        while (i < lines.length && lines[i].trim() && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && indentOf(lines[i]) > base) content += '<br>' + inline(lines[i++].trim());
-        if (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && indentOf(lines[i]) > base) {
-          const sub = listBlock(lines, i);
-          content += sub.html; i = sub.next;
-        }
-        html += `<li>${content}</li>`;
-      } else if (m && m[1].length > base) {
-        const sub = listBlock(lines, i);
-        html += sub.html; i = sub.next;
-      } else break;
+  const JSON_RE = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|([{}\[\],])/g;
+
+  function jsonTokens(line) {
+    const toks = [];
+    let pos = 0, m;
+    JSON_RE.lastIndex = 0;
+    while ((m = JSON_RE.exec(line))) {
+      if (m.index > pos) toks.push(['', line.slice(pos, m.index)]);
+      if (m[1]) { toks.push([m[2] ? 't-key' : 't-str', m[1]]); if (m[2]) toks.push(['t-punct', m[2]]); }
+      else if (m[3]) toks.push(['t-lit', m[0]]);
+      else if (m[4]) toks.push(['t-punct', m[0]]);
+      else toks.push(['t-num', m[0]]);
+      pos = JSON_RE.lastIndex;
     }
-    return { html: html + (ordered ? '</ol>' : '</ul>'), next: i };
+    if (pos < line.length) toks.push(['', line.slice(pos)]);
+    return toks.length ? toks : [['', '']];
   }
 
-  function table(rows) {
-    const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
-    const head = cells(rows[0]);
-    const body = rows.slice(2).map(cells);
-    return `<table><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>` +
-      body.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('') + '</tbody></table>';
-  }
+  // ---- find (matches may cross colored tokens) ---------------------------------
 
-  function inline(s) {
-    const codes = [];
-    let out = esc(s).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
-    out = out
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, '$1<em>$2</em>')
-      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<u>$1</u>');
-    return out.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
-  }
-
-  // Smallest run of lines starting at i that parses as JSON.
-  function jsonSpan(lines, i) {
-    let buf = '';
-    for (let j = i; j < lines.length && j < i + 5000; j++) {
-      buf += lines[j] + '\n';
-      if (!/^\s*[\]}],?\s*$/.test(lines[j])) continue;
-      try { return { value: JSON.parse(buf), next: j + 1 }; } catch {}
-    }
-    return undefined;
-  }
-
-  function codeBlock(code, lang) {
-    if (/^json/i.test(lang) && /^\s*[\[{]/.test(code)) {
-      try { return jsonBlock(JSON.parse(code)); } catch {}
-    }
-    return `<pre class="code"><code>${esc(code)}</code></pre>`;
-  }
-
-  function jsonBlock(value) {
-    const src = esc(JSON.stringify(value, null, 2));
-    const colored = src.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|\b(true|false|null)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g, (m, str, colon, lit) => {
-      if (str) return colon ? `<span class="j-key">${str}</span>${colon}` : `<span class="j-str">${str}</span>`;
-      if (lit) return `<span class="j-lit">${m}</span>`;
-      return `<span class="j-num">${m}</span>`;
-    });
-    return `<pre class="code"><code>${colored}</code></pre>`;
-  }
-
-  // ---- find -----------------------------------------------------------------------
+  let matchLines = [];
 
   function highlight(step) {
-    const q = $('find').value;
-    const root = $('view');
+    const view = $('view');
     if (!step) {
-      for (const m of root.querySelectorAll('mark')) m.replaceWith(document.createTextNode(m.textContent));
-      root.normalize();
+      for (const i of matchLines) {
+        const el = view.querySelector(`.ln[data-i="${i}"]`);
+        if (el) el.outerHTML = lineHtml(lines[i], i);
+      }
+      matchLines = [];
       findIndex = 0;
-      if (!q) return;
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      const lq = q.toLowerCase();
-      for (const node of nodes) {
-        const text = node.nodeValue, lower = text.toLowerCase();
-        let idx = lower.indexOf(lq);
-        if (idx === -1) continue;
-        const frag = document.createDocumentFragment();
-        let last = 0;
-        while (idx !== -1) {
-          frag.append(text.slice(last, idx));
-          const mk = document.createElement('mark');
-          mk.textContent = text.slice(idx, idx + q.length);
-          frag.append(mk);
-          last = idx + q.length;
-          idx = lower.indexOf(lq, last);
-        }
-        frag.append(text.slice(last));
-        node.replaceWith(frag);
+      const q = $('find').value.toLowerCase();
+      if (q) {
+        lines.forEach((l, i) => {
+          const text = l.tokens.map((t) => t[1]).join('').toLowerCase();
+          const ranges = [];
+          for (let k = text.indexOf(q); k !== -1; k = text.indexOf(q, k + q.length)) ranges.push([k, k + q.length]);
+          if (!ranges.length) return;
+          const el = view.querySelector(`.ln[data-i="${i}"]`);
+          if (el) el.outerHTML = lineHtml(l, i, ranges);
+          matchLines.push(i);
+        });
       }
     }
-    const marks = root.querySelectorAll('mark');
+    const marks = [...view.querySelectorAll('mark')].filter((m, k, all) => !(k > 0 && all[k - 1].parentElement === m.parentElement && all[k - 1].dataset.r === m.dataset.r));
+    $('vm').dataset.count = marks.length;
     if (!marks.length) return;
-    marks.forEach((m) => m.classList.remove('current'));
+    view.querySelectorAll('mark.current').forEach((m) => m.classList.remove('current'));
     if (step) findIndex = (findIndex + step + marks.length) % marks.length;
     const cur = marks[findIndex];
-    cur.classList.add('current');
-    for (let d = cur.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
+    cur.parentElement.querySelectorAll(`mark[data-r="${cur.dataset.r}"]`).forEach((m) => m.classList.add('current'));
     cur.scrollIntoView({ block: 'center' });
   }
 
   $('find').addEventListener('input', () => highlight());
   $('find').addEventListener('keydown', (e) => { if (e.key === 'Enter') highlight(e.shiftKey ? -1 : 1); });
-  $('fmt').addEventListener('click', () => { state.mode = 'formatted'; save(); paint(); });
-  $('raw').addEventListener('click', () => { state.mode = 'raw'; save(); paint(); });
+  $('indent').addEventListener('click', () => { state.indent = state.indent === false; save(); paint(); });
   $('copy').addEventListener('click', () => vscode.postMessage({ type: 'copy', id: state.selected }));
   $('open').addEventListener('click', () => vscode.postMessage({ type: 'openEditor', id: state.selected }));
   $('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));

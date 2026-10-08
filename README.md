@@ -18,32 +18,10 @@ text itself. This extension shows the exact text behind each row.
   window (Cursor's pane list plus the window's focus history) and refreshes as
   it changes; it falls back to the most recently active chat. Pick any other
   chat from the dropdown.
-- **Formatted** renders sections as collapsible boxes, markdown, and JSON;
-  **Raw** shows the exact text.
-
-## Open from Cursor's own Context Usage popover (optional patch)
-
-Cursor's popover component already supports a **View Report** button and
-clickable category rows, but in the chat view they are unwired (the button sits
-behind an internal feature flag). `scripts/cursor-popover-patch.py` wires both
-to this extension: clicking a row opens the inspector on the same chat with
-that category expanded; **View Report** opens it on the chat.
-
-```sh
-python3 scripts/cursor-popover-patch.py status
-sudo python3 scripts/cursor-popover-patch.py apply    # then reload Cursor windows
-sudo python3 scripts/cursor-popover-patch.py revert   # restores the original bytes
-```
-
-The script finds the code by pattern, refuses to patch unless exactly one
-match exists, and keeps the original snippet beside the file for `revert`.
-Cursor updates replace the file and drop the patch; on Arch,
-`sudo cp scripts/cursor-context-inspector.hook /etc/pacman.d/hooks/` re-applies
-it after every `cursor-bin` upgrade (edit its `Exec` path if the checkout moves).
-
-The command can also be called directly:
-`cursorContextInspector.open` with a chat id string or
-`{ composerId, categoryId }`.
+- The text is shown exactly as the model received it, color-coded (XML tags
+  and attributes, markdown markers, code, JSON, tool labels). **Indent**
+  visually indents the contents of nested tags; copying still gives the
+  original text.
 
 ## Where the data comes from
 

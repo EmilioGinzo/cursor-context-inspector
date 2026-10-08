@@ -2,7 +2,7 @@
   "name": "context-inspector",
   "displayName": "Agent Context Inspector",
   "description": "Click any part of Cursor's agent Context Usage (system prompt, rules, skills, MCP, subagents, conversation) and see the exact text the model received.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "local-tools",
   "private": true,
   "license": "MIT",

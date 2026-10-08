@@ -17,18 +17,8 @@ function activate(context) {
 
   context.subscriptions.push(
     status,
-    // Args (optional): a chat id string, or { composerId, categoryId } — the patched
-    // Context Usage popover passes these when a row or "View Report" is clicked.
-    vscode.commands.registerCommand('cursorContextInspector.open', (args) => Inspector.show(context, openTarget(args))),
+    vscode.commands.registerCommand('cursorContextInspector.open', () => Inspector.show(context)),
   );
-}
-
-function openTarget(args) {
-  if (typeof args === 'string') return { composerId: args };
-  if (args && typeof args === 'object' && (args.composerId || args.categoryId)) {
-    return { composerId: args.composerId, categoryId: args.categoryId };
-  }
-  return {};
 }
 
 // This window's workspace storage (beside storageUri) records the chats focused in it.
@@ -60,14 +50,9 @@ function databasePath(context) {
 class Inspector {
   static current;
 
-  static show(context, target = {}) {
+  static show(context) {
     if (!Inspector.current) Inspector.current = new Inspector(context);
     const inspector = Inspector.current;
-    if (target.composerId) {
-      inspector.chatId = target.composerId;
-      inspector.follow = false;
-    }
-    inspector.pendingCategory = target.categoryId;
     inspector.panel.reveal();
     if (inspector.ready) inspector.reload();
   }
@@ -180,8 +165,7 @@ class Inspector {
       const ctx = store.loadContext(db, this.chatId);
       this.loadedAt = ctx.lastUpdatedAt;
       this.index(ctx);
-      this.post({ type: 'context', chats, follow: this.follow, context: skeleton(ctx), focusCategory: this.pendingCategory });
-      this.pendingCategory = undefined;
+      this.post({ type: 'context', chats, follow: this.follow, context: skeleton(ctx) });
     } catch (err) {
       this.post({ type: 'error', message: `${err.message}\n\nDatabase: ${this.dbPath}` });
     }

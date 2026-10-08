@@ -17,8 +17,36 @@ function activate(context) {
 
   context.subscriptions.push(
     status,
-    vscode.commands.registerCommand('cursorContextInspector.open', () => Inspector.show(context)),
+    // Args (optional): a chat id string, or { composerId, categoryId } — the patched
+    // Context Usage popover passes these when a row or "View Report" is clicked.
+    vscode.commands.registerCommand('cursorContextInspector.open', (args) => Inspector.show(context, openTarget(args))),
   );
+}
+
+function openTarget(args) {
+  if (typeof args === 'string') return { composerId: args };
+  if (args && typeof args === 'object' && (args.composerId || args.categoryId)) {
+    return { composerId: args.composerId, categoryId: args.categoryId };
+  }
+  return {};
+}
+
+// This window's workspace storage (beside storageUri) records the chats focused in it.
+function lastFocusedChatIds(context) {
+  if (!context.storageUri) return [];
+  const file = path.join(path.dirname(context.storageUri.fsPath), 'state.vscdb');
+  if (!fs.existsSync(file)) return [];
+  let db;
+  try {
+    db = store.openDatabase(file);
+    const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'").get();
+    const data = row && JSON.parse(typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('utf8'));
+    return (data && data.lastFocusedComposerIds) || [];
+  } catch {
+    return [];
+  } finally {
+    if (db) db.close();
+  }
 }
 
 function databasePath(context) {
@@ -32,19 +60,24 @@ function databasePath(context) {
 class Inspector {
   static current;
 
-  static show(context) {
-    if (Inspector.current) {
-      Inspector.current.panel.reveal();
-      Inspector.current.reload();
-      return;
+  static show(context, target = {}) {
+    if (!Inspector.current) Inspector.current = new Inspector(context);
+    const inspector = Inspector.current;
+    if (target.composerId) {
+      inspector.chatId = target.composerId;
+      inspector.follow = false;
     }
-    Inspector.current = new Inspector(context);
+    inspector.pendingCategory = target.categoryId;
+    inspector.panel.reveal();
+    if (inspector.ready) inspector.reload();
   }
 
   constructor(context) {
+    this.context = context;
     this.dbPath = databasePath(context);
     this.follow = true;
     this.chatId = undefined;
+    this.ready = false;
     this.itemIndex = new Map();
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, 'Agent Context', vscode.ViewColumn.Active, {
       enableScripts: true,
@@ -59,10 +92,13 @@ class Inspector {
     this.walPath = `${this.dbPath}-wal`;
     this.onWal = () => this.followTick();
     fs.watchFile(this.walPath, { interval: 2000 }, this.onWal);
+    // Switching chats writes nothing to the global DB, so poll focus separately.
+    this.focusTimer = setInterval(() => this.followTick(), 2500);
   }
 
   dispose() {
     fs.unwatchFile(this.walPath, this.onWal);
+    clearInterval(this.focusTimer);
     if (this.db) this.db.close();
     Inspector.current = undefined;
   }
@@ -80,6 +116,8 @@ class Inspector {
     try {
       switch (m.type) {
         case 'ready':
+          this.ready = true;
+          return this.reload();
         case 'refresh':
           return this.reload();
         case 'selectChat':
@@ -105,26 +143,45 @@ class Inspector {
     }
   }
 
-  followTick() {
-    if (!this.follow || !this.panel.visible) return;
+  async followTick() {
+    if (!this.follow || !this.panel.visible || this.ticking) return;
+    this.ticking = true;
     try {
-      const latest = store.listComposers(this.database(), 1)[0];
-      if (latest && (latest.id !== this.chatId || latest.lastUpdatedAt !== this.loadedAt)) this.reload();
+      const db = this.database();
+      const target = (await this.focusedChatId(db)) || (store.listComposers(db, 1)[0] || {}).id;
+      if (target && (target !== this.chatId || store.lastUpdatedAt(db, target) !== this.loadedAt)) await this.reload();
     } catch {
       // Cursor may be mid-write; the next tick retries.
+    } finally {
+      this.ticking = false;
     }
   }
 
-  reload() {
+  // The chat focused in this window: Cursor's live pane list, ordered by the
+  // window's focus history. Chats without saved context (new, empty) are skipped.
+  async focusedChatId(db) {
+    let panes = [];
+    try {
+      panes = (await vscode.commands.executeCommand('composer.getOrderedSelectedComposerIds')) || [];
+    } catch {
+      // Not Cursor, or the command changed; fall back to stored focus only.
+    }
+    const focused = lastFocusedChatIds(this.context);
+    const ordered = [...focused.filter((id) => !panes.length || panes.includes(id)), ...panes];
+    return ordered.find((id) => store.hasContext(db, id));
+  }
+
+  async reload() {
     try {
       const db = this.database();
       const chats = store.listComposers(db, 60);
-      if (this.follow || !this.chatId) this.chatId = chats[0] && chats[0].id;
+      if (this.follow || !this.chatId) this.chatId = (await this.focusedChatId(db)) || (chats[0] && chats[0].id);
       if (!this.chatId) return this.post({ type: 'error', message: 'No Cursor agent chats with context data were found.' });
       const ctx = store.loadContext(db, this.chatId);
       this.loadedAt = ctx.lastUpdatedAt;
       this.index(ctx);
-      this.post({ type: 'context', chats, follow: this.follow, context: skeleton(ctx) });
+      this.post({ type: 'context', chats, follow: this.follow, context: skeleton(ctx), focusCategory: this.pendingCategory });
+      this.pendingCategory = undefined;
     } catch (err) {
       this.post({ type: 'error', message: `${err.message}\n\nDatabase: ${this.dbPath}` });
     }

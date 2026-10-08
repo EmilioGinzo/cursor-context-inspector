@@ -102,7 +102,7 @@
       <select id="chat" title="Chat"></select>
       <button id="refresh" title="Refresh">↻</button>
     </div>
-    <div class="toolbar"><label class="follow"><input type="checkbox" id="follow"> Follow the most recently active chat</label></div>
+    <div class="toolbar"><label class="follow"><input type="checkbox" id="follow"> Follow the focused chat</label></div>
     <div class="card">
       <div class="title">Context Usage</div>
       <div class="summary"><span id="pct"></span><span id="tot"></span></div>
@@ -136,7 +136,9 @@
   const save = () => vscode.setState(state);
 
   window.addEventListener('message', ({ data: m }) => {
-    if (m.type === 'context') { $('err').textContent = ''; ctx = m.context; renderChats(m.chats); $('follow').checked = m.follow; render(); if (state.selected) select(state.selected, true); }
+    if (m.type === 'context') { $('err').textContent = ''; ctx = m.context; renderChats(m.chats); $('follow').checked = m.follow;
+      if (m.focusCategory) { const key = `category:${m.focusCategory}`; state.open[key] = true; state.selected = key; }
+      render(); if (state.selected) select(state.selected, !m.focusCategory); }
     else if (m.type === 'text' && m.id === state.selected) showText(m);
     else if (m.type === 'error') $('err').textContent = m.message;
   });
@@ -489,7 +491,7 @@
   $('open').addEventListener('click', () => vscode.postMessage({ type: 'openEditor', id: state.selected }));
   $('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   $('follow').addEventListener('change', (e) => vscode.postMessage({ type: 'follow', value: e.target.checked }));
-  $('chat').addEventListener('change', (e) => { state.selected = undefined; state.open = {}; save(); vscode.postMessage({ type: 'selectChat', chatId: e.target.value }); });
+  $('chat').addEventListener('change', (e) => { state.selected = undefined; state.open = {}; save(); $('follow').checked = false; vscode.postMessage({ type: 'selectChat', chatId: e.target.value }); });
   vscode.postMessage({ type: 'ready' });
 </script>
 </body>

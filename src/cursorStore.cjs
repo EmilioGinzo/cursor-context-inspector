@@ -71,6 +71,17 @@ function listComposers(db, limit = 60) {
   return rows.map((r) => ({ ...r, hasTree: !!r.hasTree }));
 }
 
+function hasContext(db, composerId) {
+  return !!db.prepare(`SELECT 1 FROM cursorDiskKV WHERE key = ?
+    AND json_extract(value, '$.conversationState') IS NOT NULL
+    AND json_extract(value, '$.promptTokenBreakdown') IS NOT NULL`).get(`composerData:${composerId}`);
+}
+
+function lastUpdatedAt(db, composerId) {
+  const row = db.prepare("SELECT json_extract(value, '$.lastUpdatedAt') AS t FROM cursorDiskKV WHERE key = ?").get(`composerData:${composerId}`);
+  return row ? row.t : undefined;
+}
+
 // --- protobuf (conversationState) -------------------------------------------
 
 function readVarint(buf, pos) {
@@ -368,6 +379,8 @@ module.exports = {
   defaultDatabasePath,
   openDatabase,
   listComposers,
+  hasContext,
+  lastUpdatedAt,
   loadContext,
   rootMessageHashes,
   topLevelBlocks,

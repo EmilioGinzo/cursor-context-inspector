@@ -38,12 +38,17 @@ wrote anything, one Cursor window snapshots the chats that changed into
 
 | Path | Contents |
 | --- | --- |
-| `chats/<chatId>/transcript.md` | every prompt message ever seen in the chat, raw, in order; messages Cursor later dropped (e.g. by summarizing) are kept and marked |
+| `chats/<chatId>/transcript.md` | every prompt message ever seen in the chat, raw, in order; messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned |
 | `chats/<chatId>/snapshots/<lastUpdatedAt>.json` | token breakdown and the prompt's message hashes at each update |
 | `chats/<chatId>/latest.json` | newest snapshot plus Cursor's usage tree |
 | `chats/<chatId>/meta.json` | name, model, workspace, message hashes in first-seen order |
+| `chats/<chatId>/subagents/<subagentId>/` | the same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent |
 | `blobs/<sha256>.json` | each prompt message once, exactly as Cursor stored it |
-| `index.json` | all recorded chats, newest first |
+| `index.json` | all recorded chats, newest first, each with its subagent tree |
+
+A chat's subagents are recorded together with it. Folders written by earlier
+versions (subagents at the top level) are moved under their parent
+automatically.
 
 The first run also records chats from the last
 `cursorContextInspector.historyBackfillDays` (7) days. **Record History of All

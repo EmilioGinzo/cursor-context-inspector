@@ -546,6 +546,7 @@ module.exports = {
   getValue,
   messageText,
   ancestors,
+  loadSubagents,
   listComposers,
   hasContext,
   lastUpdatedAt,

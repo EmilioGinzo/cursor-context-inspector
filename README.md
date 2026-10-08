@@ -32,6 +32,10 @@ text itself. This extension shows the exact text behind each row.
   and attributes, markdown markers, code, JSON, tool labels). **Indent**
   visually indents the contents of nested tags; copying still gives the
   original text.
+- Click the opening of a tag that spans several lines (e.g. `<rules>`) to fold
+  everything up to its closing tag; click it or the `⋯ N lines` marker again
+  to unfold. Folds nest, are remembered per item, and Find unfolds a section
+  when it jumps to a match inside it.
 
 ## Session history
 

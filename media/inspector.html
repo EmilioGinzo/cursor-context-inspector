@@ -96,6 +96,19 @@
   .t-key { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); } .t-str { color: var(--vscode-debugTokenExpression-string, #ce9178); }
   .t-num { color: var(--vscode-debugTokenExpression-number, #b5cea8); } .t-lit { color: var(--vscode-debugTokenExpression-boolean, #569cd6); }
   .t-table { color: #7f848e; }
+
+  /* Folding: click a multi-line tag's opening to hide everything up to its closing tag. */
+  .ln.hid { display: none; }
+  .fold-tag { cursor: pointer; border-radius: 3px; }
+  .fold-tag:hover { background: color-mix(in srgb, var(--vscode-textLink-foreground) 18%, transparent); }
+  .fold-chev { display: inline-block; width: 14px; margin-left: -14px; text-align: center; font-size: 10px; color: var(--vscode-descriptionForeground); opacity: .35; user-select: none; }
+  .fold-chev::before { content: '▾'; }
+  .ln:hover .fold-chev, .folded .fold-chev { opacity: 1; }
+  .folded .fold-chev::before { content: '▸'; }
+  .fold-ph { display: none; margin-left: 6px; padding: 0 6px; border-radius: 3px; font-size: .9em; cursor: pointer; user-select: none;
+    color: var(--vscode-descriptionForeground); background: var(--vscode-badge-background, #ffffff14); }
+  .fold-ph:hover { color: var(--vscode-foreground); }
+  .folded .fold-ph { display: inline-block; }
 </style>
 </head>
 <body>
@@ -131,7 +144,7 @@
 <script nonce="{{nonce}}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const state = Object.assign({ open: {}, selected: undefined, indent: true }, vscode.getState() || {});
+  const state = Object.assign({ open: {}, selected: undefined, indent: true, folds: {} }, vscode.getState() || {});
     let ctx, currentText = '', currentKind = '', findIndex = 0;
 
   const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n ?? 0));
@@ -233,7 +246,7 @@
   const shorten = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
   function openChat(chatId) {
-    state.selected = undefined; state.open = {}; save();
+    state.selected = undefined; state.open = {}; state.folds = {}; save();
     vscode.postMessage({ type: 'openChat', chatId });
   }
 
@@ -266,7 +279,8 @@
   // ---- right: viewer ------------------------------------------------------------
 
   const MAX_HIGHLIGHT = 5000000, MAX_SHOWN = 5000000;
-  let lines = []; // [{ depth, tokens: [[cls, text]] }]
+  let lines = []; // [{ depth, tokens: [[cls, text]], fold?: index of the line holding the matching close tag }]
+  let folded = new Set(), hidden = new Uint8Array(0);
 
   function showText(m) {
     currentText = m.text;
@@ -284,6 +298,9 @@
     if (truncated) text = text.slice(0, MAX_SHOWN);
     lines = text.length > MAX_HIGHLIGHT ? text.split('\n').map((t) => ({ depth: 0, tokens: [['', t]] })) : tokenize(text, currentKind);
     if (truncated) lines.push({ depth: 0, tokens: [['t-label', '… truncated here — use "Open in editor" for the full text']] });
+    const saved = new Set(state.folds[state.selected] || []);
+    folded = new Set(foldKeys().filter(([, key]) => saved.has(key)).map(([i]) => i));
+    computeHidden();
     const view = $('view');
     view.innerHTML = `<div class="code${state.indent !== false ? ' indent' : ''}">${lines.map((l, i) => lineHtml(l, i)).join('')}</div>`;
     view.scrollTop = 0;
@@ -292,13 +309,13 @@
 
   function lineHtml(line, i, ranges) {
     const d = Math.min(line.depth, 8);
-    let body = '';
-    if (!ranges) body = line.tokens.map(([c, t]) => (c ? `<span class="${c}">${esc(t)}</span>` : esc(t))).join('');
+    const parts = []; // html per token, so the leading tag can be wrapped as the fold handle
+    if (!ranges) for (const [c, t] of line.tokens) parts.push(c ? `<span class="${c}">${esc(t)}</span>` : esc(t));
     else {
       // Split tokens at match boundaries so a match may span several colored tokens.
       let pos = 0;
       for (const [c, t] of line.tokens) {
-        let k = 0;
+        let k = 0, body = '';
         while (k < t.length) {
           const at = pos + k;
           const r = ranges.find(([s, e]) => at >= s && at < e);
@@ -308,10 +325,21 @@
           body += r ? `<mark data-r="${r[0]}">${span}</mark>` : span;
           k = next - pos;
         }
+        parts.push(body);
         pos += t.length;
       }
     }
-    return `<div class="ln d${d}" data-i="${i}">${body || '​'}</div>`;
+    let cls = `ln d${d}`;
+    if (line.fold) {
+      const a = line.tokens.findIndex(([c, t]) => c === 't-punct' && t === '<');
+      const b = line.tokens.findIndex(([c, t], k) => k > a && c === 't-punct' && t.endsWith('>'));
+      parts[a] = `<span class="fold-tag" title="Click to fold or unfold this tag"><span class="fold-chev"></span>${parts[a]}`;
+      parts[b] += '</span>';
+      parts.push(`<span class="fold-ph" title="Click to unfold">⋯ ${(line.fold - i - 1).toLocaleString()} lines</span>`);
+      if (folded.has(i)) cls += ' folded';
+    }
+    if (hidden[i]) cls += ' hid';
+    return `<div class="${cls}" data-i="${i}">${parts.join('') || '​'}</div>`;
   }
 
   // ---- tokenizer: exact text, tagged with classes -----------------------------
@@ -327,11 +355,15 @@
     if (wholeJson) return raw.map((l) => ({ depth: 0, tokens: jsonTokens(l) }));
 
     const opens = structuralOpens(text);
+    const lineStarts = [0];
+    for (let k = text.indexOf('\n'); k !== -1; k = text.indexOf('\n', k + 1)) lineStarts.push(k + 1);
+    const lineOf = (pos) => { let lo = 0, hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
+    const closeAt = new Map(opens.map((o) => [o.start, lineOf(o.close)]));
     const out = [];
     let depth = 0, offset = 0, mode = 'text', fence = '';
     for (const line of raw) {
       const t = line.trim();
-      let d = depth, tokens;
+      let d = depth, tokens, fold;
       if (mode === 'fence') {
         if (t.startsWith(fence)) { mode = 'text'; tokens = [['t-fence', line]]; }
         else tokens = fenceLang === 'json' ? jsonTokens(line) : [['t-code', line]];
@@ -347,9 +379,12 @@
           // Indent: a line starting with a matched close tag sits at the outer depth.
           if (/^<\//.test(t)) d = Math.max(0, depth - countLeadingCloses(t));
           tokens = mdTokens(line);
+          // Foldable: the line opens a tag whose close is at least two lines down.
+          const close = closeAt.get(offset);
+          if (close - out.length >= 2 && tokens.some(([c, s]) => c === 't-punct' && s === '<')) fold = close;
         }
       }
-      out.push({ depth: d, tokens });
+      out.push(fold ? { depth: d, tokens, fold } : { depth: d, tokens });
       // Depth after this line: matched opens on it minus closes on it.
       if (mode === 'text' || tokens[0][0] === 't-fence') {
         const lineEnd = offset + line.length;
@@ -502,9 +537,50 @@
     view.querySelectorAll('mark.current').forEach((m) => m.classList.remove('current'));
     if (step) findIndex = (findIndex + step + marks.length) % marks.length;
     const cur = marks[findIndex];
+    const at = +cur.closest('.ln').dataset.i;
+    if (hidden[at]) { for (const f of [...folded]) if (f < at && at < lines[f].fold) folded.delete(f); applyFolds(); }
     cur.parentElement.querySelectorAll(`mark[data-r="${cur.dataset.r}"]`).forEach((m) => m.classList.add('current'));
     cur.scrollIntoView({ block: 'center' });
   }
+
+  // ---- folding ------------------------------------------------------------------
+
+  function computeHidden() {
+    hidden = new Uint8Array(lines.length);
+    for (const f of folded) hidden.fill(1, f + 1, lines[f].fold);
+  }
+
+  // Folds are saved by their tag line's text (and which repeat of it), not by line number:
+  // the item's text shifts as the chat grows, and following may switch to another chat.
+  function foldKeys() {
+    const seen = new Map(), keys = [];
+    lines.forEach((l, i) => {
+      if (!l.fold) return;
+      const text = l.tokens.map((t) => t[1]).join('');
+      const n = (seen.get(text) || 0) + 1;
+      seen.set(text, n);
+      keys.push([i, `${n}:${text}`]);
+    });
+    return keys;
+  }
+
+  function applyFolds() {
+    computeHidden();
+    state.folds[state.selected] = foldKeys().filter(([i]) => folded.has(i)).map(([, key]) => key); save();
+    for (const el of $('view').querySelectorAll('.ln')) {
+      const i = +el.dataset.i;
+      el.classList.toggle('hid', !!hidden[i]);
+      if (lines[i].fold) el.classList.toggle('folded', folded.has(i));
+    }
+  }
+
+  $('view').addEventListener('click', (e) => {
+    const handle = e.target.closest('.fold-tag, .fold-ph');
+    if (!handle || !window.getSelection().isCollapsed) return;
+    const i = +handle.closest('.ln').dataset.i;
+    if (folded.has(i)) folded.delete(i); else folded.add(i);
+    applyFolds();
+  });
 
   $('find').addEventListener('input', () => highlight());
   $('find').addEventListener('keydown', (e) => { if (e.key === 'Enter') highlight(e.shiftKey ? -1 : 1); });
@@ -513,7 +589,7 @@
   $('open').addEventListener('click', () => vscode.postMessage({ type: 'openEditor', id: state.selected }));
   $('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
   $('follow').addEventListener('change', (e) => vscode.postMessage({ type: 'follow', value: e.target.checked }));
-  $('chat').addEventListener('change', (e) => { state.selected = undefined; state.open = {}; save(); $('follow').checked = false; vscode.postMessage({ type: 'selectChat', chatId: e.target.value }); });
+  $('chat').addEventListener('change', (e) => { state.selected = undefined; state.open = {}; state.folds = {}; save(); $('follow').checked = false; vscode.postMessage({ type: 'selectChat', chatId: e.target.value }); });
   vscode.postMessage({ type: 'ready' });
 </script>
 </body>

@@ -91,8 +91,9 @@ function chatMarkdown(meta, messages, { subagents = [], parent } = {}) {
       for (const p of parts(m)) if (p.type === 'image') say('User', '_[image]_');
     } else if (m.role === 'assistant') {
       for (const p of parts(m)) {
-        if (p.type === 'text' && p.text.trim()) say(agent, p.text.trim());
-        else if (p.type === 'reasoning' && p.text.trim()) say(agent, details('Thinking', p.text.trim()));
+        const text = asText(p.text).trim();
+        if (p.type === 'text' && text) say(agent, text);
+        else if (p.type === 'reasoning' && text) say(agent, details('Thinking', text));
         else if (p.type === 'tool-call') {
           const hint = toolHint(p.args);
           const result = results.get(p.toolCallId);

@@ -320,7 +320,12 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
   let recorded = 0;
   let watermark = since;
   for (const r of rows) {
-    recorded += recordChat(db, r.id, dir);
+    // One unreadable chat must not stop the others (or the backfill) for good.
+    try {
+      recorded += recordChat(db, r.id, dir);
+    } catch (err) {
+      console.error(`[context-inspector] could not record chat ${r.id}:`, err);
+    }
     watermark = Math.max(watermark, r.t);
   }
   if (recorded) writeIndex(dir);

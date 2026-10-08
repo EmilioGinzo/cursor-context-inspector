@@ -91,6 +91,7 @@ function readVarint(buf, pos) {
   let shift = 0;
   for (;;) {
     const byte = buf[pos++];
+    if (byte === undefined) throw new Error('truncated varint');
     result += (byte & 0x7f) * 2 ** shift;
     shift += 7;
     if (byte < 0x80) return [result, pos];

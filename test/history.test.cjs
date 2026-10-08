@@ -198,6 +198,24 @@ test('older chats are caught up in batches, also after an earlier 7-day backfill
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).backfilling], [1, false], 'new chats still recorded after the backfill');
 });
 
+test('a chat that cannot be read is skipped, the others are still recorded', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, first], { id: 'good', name: 'Good chat' });
+  // Field 1, length-delimited, length varint cut off.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:bad', JSON.stringify({
+    name: 'Bad chat', lastUpdatedAt: 2000, conversationState: `~${Buffer.from([0x0a, 0x80]).toString('base64')}`,
+  }));
+  save(3000, [sys, { role: 'assistant', content: [{ type: 'text' }, { type: 'reasoning' }] }], { id: 'odd', name: 'Odd chat' });
+  const error = console.error;
+  console.error = () => {};
+  try {
+    assert.strictEqual(history.tick(db, dir).backfilling, false);
+  } finally {
+    console.error = error;
+  }
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')).sort(), ['Good chat', 'Odd chat']);
+});
+
 test('historyBackfillDays limits the catch-up', () => {
   const { db, save, dir } = setup();
   save(1000, [sys], { id: 'old', name: 'Old chat' });

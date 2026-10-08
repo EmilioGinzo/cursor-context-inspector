@@ -5,43 +5,94 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src 'nonce-{{nonce}}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style nonce="{{nonce}}">
-  :root {
-    --c-system_prompt: #a3a3a3; --c-tools: #a99cf5; --c-rules: #a3d97a; --c-skills: #f5d76e;
-    --c-mcp: #9d8cf0; --c-subagents: #f59f6e; --c-summarized_conversation: #6ec9f5; --c-conversation: #f0806a; --c-raw: #777;
-  }
+  /* The CSP blocks inline style="" attributes, so colors are classes and widths are set from script. */
+  .c-system_prompt { --cat: #a3a3a3; } .c-tools { --cat: #a99cf5; } .c-rules { --cat: #a3d97a; } .c-skills { --cat: #f5d76e; }
+  .c-mcp { --cat: #8f7cf0; } .c-subagents { --cat: #f5a56e; } .c-summarized_conversation { --cat: #6ec9f5; } .c-conversation { --cat: #f0806a; } .c-raw { --cat: #777; }
+
   * { box-sizing: border-box; }
   body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
   .layout { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; height: 100vh; }
   .left { border-right: 1px solid var(--vscode-panel-border); overflow: auto; padding: 12px; }
-  .right { display: flex; flex-direction: column; min-width: 0; }
+  .right { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
   select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); padding: 3px; }
   button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 4px 9px; border-radius: 3px; cursor: pointer; }
   button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   label.follow { display: flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+
   .card { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 8px; padding: 12px; }
   .title { font-weight: 600; margin-bottom: 8px; }
   .summary { display: flex; justify-content: space-between; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
   .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--vscode-input-background); margin-bottom: 10px; }
+  .bar > div { height: 100%; background: var(--cat); }
+  .bar > div + div { margin-left: 1px; }
   .meta { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 8px; }
+
   .row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; user-select: none; }
   .row:hover { background: var(--vscode-list-hoverBackground); }
   .row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .row .chev { width: 12px; color: var(--vscode-descriptionForeground); font-size: 10px; }
-  .row .sw { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+  .row .chev { width: 10px; flex: none; color: var(--vscode-descriptionForeground); font-size: 10px; }
+  .row .sw { width: 11px; height: 11px; border-radius: 2px; flex: none; background: var(--cat); }
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .tok { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
   .row.dim .name { opacity: .6; }
-  .children { margin-left: 14px; }
+  .children { margin-left: 11px; padding-left: 6px; border-left: 2px solid color-mix(in srgb, var(--cat) 45%, transparent); }
   .sep { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
+
   .viewer-head { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); }
   .viewer-head .vt { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .viewer-head .vm { color: var(--vscode-descriptionForeground); }
-  input.find { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; width: 160px; }
-  pre { flex: 1; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
-  mark { background: var(--vscode-editor-findMatchHighlightBackground); color: inherit; }
+  .viewer-head .vm { color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .seg { display: flex; }
+  .seg button { border-radius: 0; }
+  .seg button:first-child { border-radius: 3px 0 0 3px; }
+  .seg button:last-child { border-radius: 0 3px 3px 0; }
+  input.find { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; width: 150px; }
+  #view { flex: 1; overflow: auto; min-height: 0; }
+  mark { background: var(--vscode-editor-findMatchHighlightBackground, #f5d76e66); color: inherit; border-radius: 2px; }
+  mark.current { outline: 1px solid var(--vscode-editor-findMatchBorder, #f5d76e); }
   .empty { color: var(--vscode-descriptionForeground); padding: 24px; }
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+
+  /* Raw view */
+  pre.raw { margin: 0; padding: 14px 16px; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+
+  /* Formatted view */
+  .doc { padding: 14px 18px 40px; line-height: 1.55; max-width: 980px; }
+  .doc details.tag { margin: 8px 0; border: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--accent, var(--cat, var(--vscode-textLink-foreground))); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 70%, transparent); }
+  .doc details.tag > summary { cursor: pointer; padding: 6px 10px; display: flex; gap: 8px; align-items: baseline; list-style: none; user-select: none; }
+  .doc details.tag > summary::-webkit-details-marker { display: none; }
+  .doc details.tag > summary::before { content: '▸'; font-size: 10px; color: var(--vscode-descriptionForeground); width: 10px; }
+  .doc details.tag[open] > summary::before { content: '▾'; }
+  .doc details.tag[open] > summary { border-bottom: 1px solid var(--vscode-panel-border); }
+  .doc .tagname { font-family: var(--vscode-editor-font-family); font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .doc .tagtitle { font-weight: 600; }
+  .doc .tagtitle .dir { font-weight: 400; color: var(--vscode-descriptionForeground); }
+  .doc .tagattrs { font-size: 11px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .doc .tagsize { font-size: 11px; color: var(--vscode-descriptionForeground); margin-left: auto; white-space: nowrap; }
+  .doc .tagbody { padding: 4px 14px 8px; }
+  .doc details.tag details.tag { --accent: #a3d97a; }
+  .doc details.tag details.tag details.tag { --accent: #f5d76e; }
+  .doc details.tag details.tag details.tag details.tag { --accent: #f5a56e; }
+  .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 { margin: 14px 0 6px; line-height: 1.3; }
+  .doc h1 { font-size: 1.45em; } .doc h2 { font-size: 1.25em; } .doc h3 { font-size: 1.1em; } .doc h4, .doc h5, .doc h6 { font-size: 1em; }
+  .doc h1, .doc h2 { padding-bottom: 4px; border-bottom: 1px solid var(--vscode-panel-border); }
+  .doc p { margin: 6px 0; }
+  .doc ul, .doc ol { margin: 4px 0 8px; padding-left: 22px; }
+  .doc li { margin: 2px 0; }
+  .doc blockquote { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--vscode-textBlockQuote-border, #555); color: var(--vscode-descriptionForeground); }
+  .doc code { font-family: var(--vscode-editor-font-family); font-size: .92em; background: var(--vscode-textCodeBlock-background, #ffffff14); padding: 1px 4px; border-radius: 3px; }
+  .doc pre.code { margin: 8px 0; padding: 10px 12px; overflow-x: auto; background: var(--vscode-textCodeBlock-background, #ffffff10); border-radius: 6px; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .doc pre.code code { background: none; padding: 0; }
+  .doc table { border-collapse: collapse; margin: 8px 0; font-size: .95em; }
+  .doc th, .doc td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .doc th { background: var(--vscode-editorWidget-background); }
+  .doc hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 12px 0; }
+  .doc .label { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--vscode-descriptionForeground); margin: 10px 0 2px; }
+  .doc .divider { margin: 18px 0 6px; padding: 4px 0; font-weight: 600; border-bottom: 1px solid var(--vscode-panel-border); display: flex; justify-content: space-between; }
+  .doc .divider span { font-weight: 400; color: var(--vscode-descriptionForeground); }
+  .j-key { color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe); } .j-str { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+  .j-num { color: var(--vscode-debugTokenExpression-number, #b5cea8); } .j-lit { color: var(--vscode-debugTokenExpression-boolean, #569cd6); }
 </style>
 </head>
 <body>
@@ -65,21 +116,23 @@
     <div class="viewer-head">
       <span class="vt" id="vt">Select a category or item</span>
       <span class="vm" id="vm"></span>
-      <input class="find" id="find" placeholder="Find in text">
+      <div class="seg"><button id="fmt" class="on">Formatted</button><button id="raw">Raw</button></div>
+      <input class="find" id="find" placeholder="Find (Enter = next)">
       <button id="copy" disabled>Copy</button>
       <button id="open" disabled>Open in editor</button>
     </div>
-    <pre id="text"><span class="empty">Click any row on the left to see the exact text the agent received for it.</span></pre>
+    <div id="view"><div class="empty">Click any row on the left to see the exact text the agent received for it.</div></div>
   </div>
 </div>
 <script nonce="{{nonce}}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const state = vscode.getState() || { open: {}, selected: undefined };
-  let ctx, currentText = '';
+  const state = Object.assign({ open: {}, selected: undefined, mode: 'formatted' }, vscode.getState() || {});
+  const MAX_FORMATTED = 250000, MAX_RAW = 400000;
+  let ctx, currentText = '', currentKind = '', currentCat = '', findIndex = 0;
 
   const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n ?? 0));
-  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const save = () => vscode.setState(state);
 
   window.addEventListener('message', ({ data: m }) => {
@@ -88,10 +141,12 @@
     else if (m.type === 'error') $('err').textContent = m.message;
   });
 
+  // ---- left: popover replica + tree ------------------------------------------
+
   function renderChats(chats) {
     const sel = $('chat');
     if (!chats.some((c) => c.id === ctx.composerId)) chats = [{ id: ctx.composerId, name: ctx.name, used: ctx.totalUsedTokens }, ...chats];
-    sel.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.name || 'Untitled chat')} — ${fmt(c.used)} tok · ${new Date(c.lastUpdatedAt).toLocaleString()}</option>`).join('');
+    sel.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.name || 'Untitled chat')} — ${fmt(c.used)} tok${c.lastUpdatedAt ? ' · ' + new Date(c.lastUpdatedAt).toLocaleString() : ''}</option>`).join('');
     sel.value = ctx.composerId;
   }
 
@@ -99,7 +154,9 @@
     const pct = ctx.maxTokens ? Math.round((ctx.totalUsedTokens / ctx.maxTokens) * 100) : 0;
     $('pct').textContent = `${pct}% Full`;
     $('tot').textContent = `~${fmt(ctx.totalUsedTokens)} / ${fmt(ctx.maxTokens)} Tokens`;
-    $('bar').innerHTML = ctx.categories.map((c) => `<div style="width:${ctx.maxTokens ? (c.estimatedTokens / ctx.maxTokens) * 100 : 0}%;background:var(--c-${c.id})"></div>`).join('');
+    const bar = $('bar');
+    bar.innerHTML = ctx.categories.filter((c) => c.estimatedTokens > 0).map((c) => `<div class="c-${c.id}" data-tokens="${c.estimatedTokens}" title="${esc(c.label)}: ${fmt(c.estimatedTokens)}"></div>`).join('');
+    for (const seg of bar.children) seg.style.width = `${ctx.maxTokens ? (seg.dataset.tokens / ctx.maxTokens) * 100 : 0}%`;
     $('meta').textContent = `${ctx.model || ''} · ${ctx.hasTree ? 'item spans from Cursor’s usage tree' : 'items parsed from the stored prompt'}`;
     const cats = ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
     $('cats').innerHTML = cats.map((c) => category(c.id, c.label, c.estimatedTokens, c.items)).join('') +
@@ -108,21 +165,21 @@
 
   function category(id, label, tokens, items) {
     const key = `category:${id}`;
-    return row(key, label, tokens, items.length > 0, `var(--c-${id})`, false) +
-      (state.open[key] ? `<div class="children">${items.map(item).join('')}</div>` : '');
+    return `<div class="c-${id}">` + row(key, label, tokens, items.length > 0, true, false) +
+      (state.open[key] ? `<div class="children">${items.map(item).join('')}</div>` : '') + '</div>';
   }
 
   function item(i) {
     const kids = i.children && i.children.length;
-    return row(i.id, i.label, i.estimatedTokens, kids, undefined, i.unavailable) +
+    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable) +
       (kids && state.open[i.id] ? `<div class="children">${i.children.map(item).join('')}</div>` : '');
   }
 
-  function row(id, label, tokens, expandable, color, dim) {
+  function row(id, label, tokens, expandable, swatch, dim) {
     const chev = expandable ? (state.open[id] ? '▾' : '▸') : '';
     return `<div class="row${state.selected === id ? ' selected' : ''}${dim ? ' dim' : ''}" data-id="${esc(id)}">` +
-      `<span class="chev" data-toggle="${esc(id)}">${chev}</span>` +
-      (color ? `<span class="sw" style="background:${color}"></span>` : '') +
+      `<span class="chev" data-toggle="1">${chev}</span>` +
+      (swatch ? '<span class="sw"></span>' : '') +
       `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
       `<span class="tok">${tokens === undefined ? '' : fmt(tokens)}</span></div>`;
   }
@@ -131,19 +188,24 @@
     const r = e.target.closest('.row'); if (!r) return;
     const id = r.dataset.id;
     // Chevron or a second click toggles; first click on a category also expands it.
-    if ((e.target.dataset.toggle !== undefined && e.target.textContent) || state.selected === id) state.open[id] = !state.open[id];
+    if ((e.target.dataset.toggle && e.target.textContent) || state.selected === id) state.open[id] = !state.open[id];
     else if (id.startsWith('category:')) state.open[id] = true;
     select(id);
   });
 
   function select(id, quiet) {
     state.selected = id; save(); render();
-    if (!quiet) { $('vt').textContent = 'Loading…'; }
+    const cat = document.querySelector(`.row[data-id="${CSS.escape(id)}"]`)?.closest('[class^="c-"]');
+    currentCat = cat ? cat.className : '';
+    if (!quiet) $('vt').textContent = 'Loading…';
     vscode.postMessage({ type: 'text', id });
   }
 
+  // ---- right: viewer ------------------------------------------------------------
+
   function showText(m) {
     currentText = m.text;
+    currentKind = m.kind || '';
     $('vt').textContent = m.label;
     $('vm').textContent = `${m.estimatedTokens !== undefined ? '~' + fmt(m.estimatedTokens) + ' tokens · ' : ''}${m.text.length.toLocaleString()} chars`;
     $('copy').disabled = $('open').disabled = false;
@@ -151,15 +213,278 @@
   }
 
   function paint() {
-    const q = $('find').value;
-    const shown = currentText.length > 400000 ? currentText.slice(0, 400000) + '\n\n… (truncated in this view — use "Open in editor" for the full text)' : currentText;
-    if (!q) { $('text').textContent = shown; return; }
-    const parts = shown.split(q);
-    $('text').innerHTML = parts.map(esc).join(`<mark>${esc(q)}</mark>`);
-    const first = $('text').querySelector('mark'); if (first) first.scrollIntoView({ block: 'center' });
+    const view = $('view');
+    $('fmt').classList.toggle('on', state.mode === 'formatted');
+    $('raw').classList.toggle('on', state.mode === 'raw');
+    if (state.mode === 'raw' || currentText.length > MAX_FORMATTED) {
+      const shown = currentText.length > MAX_RAW ? currentText.slice(0, MAX_RAW) + '\n\n… (truncated here — use "Open in editor" for the full text)' : currentText;
+      view.innerHTML = `<pre class="raw">${esc(shown)}</pre>`;
+    } else {
+      view.innerHTML = `<div class="doc ${currentCat}">${formatDocument(currentText, currentKind)}</div>`;
+    }
+    view.scrollTop = 0;
+    highlight();
   }
 
-  $('find').addEventListener('input', paint);
+  // ---- formatter: XML-ish sections -> collapsible boxes, markdown, JSON -----
+
+  const OPEN_RE = /<([a-zA-Z][\w-]*)((?:\s+[\w:-]+="[^"]*")*)\s*>/g;
+  const DIVIDER_RE = /^===== (.*?) =====$/;
+  const LABEL_RE = /^\[(reasoning|tool call: [^\]]+|tool result: [^\]]+|image)\]$/;
+
+  function formatDocument(text, kind) {
+    const trimmed = text.trim();
+    if (/^[\[{]/.test(trimmed)) {
+      try { return jsonBlock(JSON.parse(trimmed)); } catch {}
+    }
+    if (kind === 'tool_call' || kind === 'tool_result') return codeBlock(text, 'json?');
+    return renderSegments(text, 0);
+  }
+
+  // Splits text into structural tags (with a matching close) and prose.
+  function renderSegments(text, depth) {
+    let out = '', pos = 0, m;
+    OPEN_RE.lastIndex = 0;
+    while ((m = OPEN_RE.exec(text))) {
+      const close = `</${m[1]}>`;
+      const end = findClose(text, m[1], OPEN_RE.lastIndex);
+      if (end === -1 || insideCode(text, m.index)) continue;
+      out += prose(text.slice(pos, m.index));
+      const body = text.slice(OPEN_RE.lastIndex, end);
+      out += tagBox(m[1], parseAttrs(m[2]), body, depth);
+      pos = end + close.length;
+      OPEN_RE.lastIndex = pos;
+    }
+    return out + prose(text.slice(pos));
+  }
+
+  // Matching close tag, accounting for nested tags of the same name.
+  function findClose(text, name, from) {
+    const open = new RegExp(`<${name}(?:\\s[^>]*)?>`, 'g'), closeTag = `</${name}>`;
+    let depth = 1, i = from;
+    for (;;) {
+      const c = text.indexOf(closeTag, i);
+      if (c === -1) return -1;
+      open.lastIndex = i;
+      let o;
+      while ((o = open.exec(text)) && o.index < c) depth++;
+      if (--depth === 0) return c;
+      i = c + closeTag.length;
+    }
+  }
+
+  function insideCode(text, index) {
+    const before = text.slice(Math.max(0, index - 2000), index);
+    const fences = (before.match(/^```/gm) || []).length;
+    const line = before.slice(before.lastIndexOf('\n') + 1);
+    return fences % 2 === 1 || (line.split('`').length - 1) % 2 === 1;
+  }
+
+  function parseAttrs(s) {
+    const attrs = [];
+    s.replace(/([\w:-]+)="([^"]*)"/g, (_, k, v) => attrs.push([k, v]));
+    return attrs;
+  }
+
+  function tagBox(name, attrs, body, depth) {
+    const titleAttr = attrs.find(([k]) => ['fullPath', 'name', 'path', 'id', 'title'].includes(k));
+    let title = '';
+    if (titleAttr) {
+      const v = titleAttr[1], slash = v.lastIndexOf('/');
+      title = slash > 0 && slash < v.length - 1 ? `<span class="dir">${esc(v.slice(0, slash + 1))}</span>${esc(v.slice(slash + 1))}` : esc(v);
+    }
+    const rest = attrs.filter((a) => a !== titleAttr).map(([k, v]) => `${k}="${v}"`).join(' ');
+    const big = body.length > 20000 && depth > 0;
+    return `<details class="tag"${big ? '' : ' open'}><summary>` +
+      `<span class="tagname">&lt;${esc(name)}&gt;</span>` +
+      (title ? `<span class="tagtitle">${title}</span>` : '') +
+      (rest ? `<span class="tagattrs" title="${esc(rest)}">${esc(rest)}</span>` : '') +
+      `<span class="tagsize">${fmt(Math.ceil(body.length / 4))} tok</span>` +
+      `</summary><div class="tagbody">${renderSegments(body, depth + 1)}</div></details>`;
+  }
+
+  function prose(text) {
+    if (!text.trim()) return '';
+    const lines = text.replace(/\r/g, '').split('\n');
+    let html = '', i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      const fence = line.match(/^\s*(```+|~~~+)\s*([\w+-]*)/);
+      if (fence) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !lines[i].trim().startsWith(fence[1])) buf.push(lines[i++]);
+        i++;
+        html += codeBlock(buf.join('\n'), fence[2]);
+        continue;
+      }
+      const div = line.match(DIVIDER_RE);
+      if (div) {
+        const t = div[1].match(/^(.*?)\s*(\(~.*\))?$/);
+        html += `<div class="divider">${esc(t[1])}<span>${esc(t[2] || '')}</span></div>`;
+        i++; continue;
+      }
+      if (!line.trim()) { i++; continue; }
+      const h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { html += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; i++; continue; }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { html += '<hr>'; i++; continue; }
+      const lbl = line.match(LABEL_RE);
+      if (lbl) {
+        html += `<div class="label">${esc(lbl[1])}</div>`;
+        i++;
+        if (/^tool (call|result)/.test(lbl[1])) {
+          // Tool payloads are data, not prose: show them verbatim up to the next label.
+          const buf = [];
+          while (i < lines.length && !LABEL_RE.test(lines[i])) buf.push(lines[i++]);
+          html += codeBlock(buf.join('\n').replace(/^\n+|\n+$/g, ''), 'json?');
+        }
+        continue;
+      }
+      if (/^\s*[\[{]\s*$/.test(line)) {
+        const json = jsonSpan(lines, i);
+        if (json) { html += jsonBlock(json.value); i = json.next; continue; }
+      }
+      if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+        const rows = [];
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+        html += table(rows);
+        continue;
+      }
+      if (/^\s*>/.test(line)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+        html += `<blockquote>${prose(buf.join('\n'))}</blockquote>`;
+        continue;
+      }
+      if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
+        const { html: list, next } = listBlock(lines, i);
+        html += list; i = next; continue;
+      }
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|\s*```|\s*~~~|\s*>|\s*([-*+]|\d+[.)])\s+|\s*\|.*\|\s*$|===== )/.test(lines[i])) buf.push(lines[i++]);
+      if (!buf.length) buf.push(lines[i++]);
+      html += `<p>${buf.map(inline).join('<br>')}</p>`;
+    }
+    return html;
+  }
+
+  function listBlock(lines, i) {
+    const indentOf = (l) => l.match(/^\s*/)[0].length;
+    const base = indentOf(lines[i]);
+    const ordered = /^\s*\d+[.)]/.test(lines[i]);
+    let html = ordered ? '<ol>' : '<ul>';
+    while (i < lines.length) {
+      const l = lines[i];
+      const m = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (m && m[1].length === base) {
+        let content = inline(m[3]);
+        i++;
+        while (i < lines.length && lines[i].trim() && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && indentOf(lines[i]) > base) content += '<br>' + inline(lines[i++].trim());
+        if (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && indentOf(lines[i]) > base) {
+          const sub = listBlock(lines, i);
+          content += sub.html; i = sub.next;
+        }
+        html += `<li>${content}</li>`;
+      } else if (m && m[1].length > base) {
+        const sub = listBlock(lines, i);
+        html += sub.html; i = sub.next;
+      } else break;
+    }
+    return { html: html + (ordered ? '</ol>' : '</ul>'), next: i };
+  }
+
+  function table(rows) {
+    const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+    const head = cells(rows[0]);
+    const body = rows.slice(2).map(cells);
+    return `<table><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>` +
+      body.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('') + '</tbody></table>';
+  }
+
+  function inline(s) {
+    const codes = [];
+    let out = esc(s).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+    out = out
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, '$1<em>$2</em>')
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<u>$1</u>');
+    return out.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
+  }
+
+  // Smallest run of lines starting at i that parses as JSON.
+  function jsonSpan(lines, i) {
+    let buf = '';
+    for (let j = i; j < lines.length && j < i + 5000; j++) {
+      buf += lines[j] + '\n';
+      if (!/^\s*[\]}],?\s*$/.test(lines[j])) continue;
+      try { return { value: JSON.parse(buf), next: j + 1 }; } catch {}
+    }
+    return undefined;
+  }
+
+  function codeBlock(code, lang) {
+    if (/^json/i.test(lang) && /^\s*[\[{]/.test(code)) {
+      try { return jsonBlock(JSON.parse(code)); } catch {}
+    }
+    return `<pre class="code"><code>${esc(code)}</code></pre>`;
+  }
+
+  function jsonBlock(value) {
+    const src = esc(JSON.stringify(value, null, 2));
+    const colored = src.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|\b(true|false|null)\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g, (m, str, colon, lit) => {
+      if (str) return colon ? `<span class="j-key">${str}</span>${colon}` : `<span class="j-str">${str}</span>`;
+      if (lit) return `<span class="j-lit">${m}</span>`;
+      return `<span class="j-num">${m}</span>`;
+    });
+    return `<pre class="code"><code>${colored}</code></pre>`;
+  }
+
+  // ---- find -----------------------------------------------------------------------
+
+  function highlight(step) {
+    const q = $('find').value;
+    const root = $('view');
+    if (!step) {
+      for (const m of root.querySelectorAll('mark')) m.replaceWith(document.createTextNode(m.textContent));
+      root.normalize();
+      findIndex = 0;
+      if (!q) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      const lq = q.toLowerCase();
+      for (const node of nodes) {
+        const text = node.nodeValue, lower = text.toLowerCase();
+        let idx = lower.indexOf(lq);
+        if (idx === -1) continue;
+        const frag = document.createDocumentFragment();
+        let last = 0;
+        while (idx !== -1) {
+          frag.append(text.slice(last, idx));
+          const mk = document.createElement('mark');
+          mk.textContent = text.slice(idx, idx + q.length);
+          frag.append(mk);
+          last = idx + q.length;
+          idx = lower.indexOf(lq, last);
+        }
+        frag.append(text.slice(last));
+        node.replaceWith(frag);
+      }
+    }
+    const marks = root.querySelectorAll('mark');
+    if (!marks.length) return;
+    marks.forEach((m) => m.classList.remove('current'));
+    if (step) findIndex = (findIndex + step + marks.length) % marks.length;
+    const cur = marks[findIndex];
+    cur.classList.add('current');
+    for (let d = cur.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
+    cur.scrollIntoView({ block: 'center' });
+  }
+
+  $('find').addEventListener('input', () => highlight());
+  $('find').addEventListener('keydown', (e) => { if (e.key === 'Enter') highlight(e.shiftKey ? -1 : 1); });
+  $('fmt').addEventListener('click', () => { state.mode = 'formatted'; save(); paint(); });
+  $('raw').addEventListener('click', () => { state.mode = 'raw'; save(); paint(); });
   $('copy').addEventListener('click', () => vscode.postMessage({ type: 'copy', id: state.selected }));
   $('open').addEventListener('click', () => vscode.postMessage({ type: 'openEditor', id: state.selected }));
   $('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));

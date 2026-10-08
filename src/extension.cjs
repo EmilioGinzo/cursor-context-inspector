@@ -154,7 +154,7 @@ class Inspector {
         .join('\n\n');
     }
     if (!text) text = item.unavailable || item.note || '(empty)';
-    return { label: item.label, estimatedTokens: item.estimatedTokens, text };
+    return { label: item.label, kind: item.kind, estimatedTokens: item.estimatedTokens, text };
   }
 }
 

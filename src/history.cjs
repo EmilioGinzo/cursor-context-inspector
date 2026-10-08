@@ -13,6 +13,7 @@
 //   meta.json                      name, model, workspace, message hashes in first-seen order
 //   snapshots/<lastUpdatedAt>.json token breakdown + the root message hashes at that moment
 //   latest.json                    newest snapshot plus Cursor's usage tree
+//   chat.md                        the conversation, readable: user, agent, thinking, tool calls
 //   transcript.md                  every message ever seen, raw text, in order; links subagents
 //   subagents/<subagent name>/     a <chat> for each subagent it spawned (nested to any depth)
 //
@@ -22,6 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const store = require('./cursorStore.cjs');
+const { chatMarkdown } = require('./chatMarkdown.cjs');
 
 function defaultHistoryDir() {
   return path.join(os.homedir(), '.cursor-context-history');
@@ -191,6 +193,8 @@ function writeTranscript(db, dir, chatDir, meta, currentHashes) {
   const subagents = store.loadSubagents(db, meta.subagentIds || []).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
   writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent));
+  const messages = meta.seen.map((hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined)).filter(Boolean);
+  writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, messages, { subagents, parent }));
 }
 
 // Re-render every recorded transcript (after a layout change), refreshing
@@ -272,6 +276,11 @@ function migrateLayout(db, dir) {
     if (fs.existsSync(from) && target !== from) mergeInto(from, target);
     const subDir = path.join(target, 'subagents');
     for (const [entry, subId] of [...folderOwners(subDir)]) walk(path.join(subDir, entry), subId);
+    // Chats recorded before 0.10 have no chat.md yet.
+    const meta = readJson(path.join(target, 'meta.json'), {});
+    if (meta.seen && !fs.existsSync(path.join(target, 'chat.md'))) {
+      writeTranscript(db, dir, target, meta, readJson(path.join(target, 'latest.json'), { messages: meta.seen }).messages);
+    }
     checkedFolders.add(target);
   };
   for (const [entry, id] of [...folderOwners(chatsDir)]) if (fs.existsSync(path.join(chatsDir, entry))) walk(path.join(chatsDir, entry), id);

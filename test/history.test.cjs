@@ -205,3 +205,38 @@ test('historyBackfillDays limits the catch-up', () => {
   history.tick(db, dir, { backfillDays: 1 });
   assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')), ['Recent chat']);
 });
+
+test('chat.md shows the conversation without injected context, tool calls collapsed with results', () => {
+  const { db, save, dir } = setup();
+  save(1000, [
+    sys,
+    { role: 'user', content: [{ type: 'text', text: '<user_info>\nOS: linux\n</user_info>' }, { type: 'text', text: '<user_query>\nfix the bug\n</user_query>' }] },
+    { role: 'assistant', content: [
+      { type: 'reasoning', text: 'look at the file' },
+      { type: 'redacted-reasoning', data: 'xyz' },
+      { type: 'text', text: 'Reading it.' },
+      { type: 'tool-call', toolCallId: 't1', toolName: 'Read', args: { path: '/a.js' } },
+    ] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'Read', result: 'const a = ```1```;' }] },
+  ]);
+  history.recordUpdatedSince(db, dir, 0);
+  const md = fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8');
+  assert.match(md, /_\*\*User\*\*_\n\nfix the bug\n/);
+  assert.doesNotMatch(md, /user_info|You are an agent|xyz/);
+  assert.match(md, /<summary>Thinking<\/summary>\n\nlook at the file/);
+  assert.match(md, /<summary>Tool: <b>Read<\/b> — \/a.js<\/summary>/);
+  assert.match(md, /````\nconst a = ```1```;\n````/, 'fence longer than the result\'s backticks');
+  assert.strictEqual(md.match(/_\*\*Agent/g).length, 1, 'one heading per turn');
+});
+
+test('chats recorded before chat.md existed get one', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, { role: 'user', content: '<summary>\nearlier we talked\n</summary>\n<user_query>hi</user_query>' }]);
+  history.recordUpdatedSince(db, dir, 0);
+  const file = path.join(dir, 'chats', 'History chat', 'chat.md');
+  fs.rmSync(file);
+  history.tick(db, dir);
+  const md = fs.readFileSync(file, 'utf8');
+  assert.match(md, /_\*\*User\*\*_\n\nhi\n/);
+  assert.match(md, /<summary>Summarized by Cursor<\/summary>\n\nearlier we talked/);
+});

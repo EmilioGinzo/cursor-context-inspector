@@ -46,12 +46,13 @@ wrote anything, one Cursor window snapshots the chats that changed into
 
 | Path | Contents |
 | --- | --- |
+| `chats/<chat name>/chat.md` | the conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages |
 | `chats/<chat name>/transcript.md` | every prompt message ever seen in the chat, raw, in order; messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned |
 | `chats/<chat name>/snapshots/<lastUpdatedAt>.json` | token breakdown and the prompt's message hashes at each update |
 | `chats/<chat name>/latest.json` | newest snapshot plus Cursor's usage tree |
 | `chats/<chat name>/meta.json` | name, model, workspace, message hashes in first-seen order |
 | `chats/<chat name>/subagents/<subagent name>/` | the same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent |
-| `blobs/<sha256>.json` | each prompt message once, exactly as Cursor stored it |
+| `blobs/<sha256>.json` | each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading) |
 | `index.json` | all recorded chats, newest first, each with its subagent tree |
 
 Folders are named after the chat, with characters that are not valid in file

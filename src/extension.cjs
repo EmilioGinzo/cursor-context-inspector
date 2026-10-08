@@ -84,10 +84,20 @@ async function recordAll(context) {
 }
 
 // This window's workspace storage (beside storageUri) records the chats focused in it.
+// Cursor flushes it only about once a minute, so it lags behind live focus.
+const focusCache = { mtimeMs: undefined, ids: [] };
 function lastFocusedChatIds(context) {
   if (!context.storageUri) return [];
   const file = path.join(path.dirname(context.storageUri.fsPath), 'state.vscdb');
-  if (!fs.existsSync(file)) return [];
+  const stat = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stat) return [];
+  if (stat.mtimeMs === focusCache.mtimeMs) return focusCache.ids;
+  focusCache.mtimeMs = stat.mtimeMs;
+  focusCache.ids = readLastFocusedChatIds(file);
+  return focusCache.ids;
+}
+
+function readLastFocusedChatIds(file) {
   let db;
   try {
     db = store.openDatabase(file);
@@ -116,7 +126,7 @@ class Inspector {
     if (!Inspector.current) Inspector.current = new Inspector(context);
     const inspector = Inspector.current;
     inspector.panel.reveal();
-    if (inspector.ready) inspector.reload();
+    if (inspector.ready) inspector.reload({ refocus: true });
   }
 
   constructor(context) {
@@ -126,6 +136,9 @@ class Inspector {
     this.chatId = undefined;
     this.ready = false;
     this.itemIndex = new Map();
+    this.recentChatIds = []; // newest first, from live pane changes and stored focus
+    this.panes = undefined;
+    this.storedHead = undefined;
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, 'Agent Context', vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -140,7 +153,7 @@ class Inspector {
     this.onWal = () => this.followTick();
     fs.watchFile(this.walPath, { interval: 2000 }, this.onWal);
     // Switching chats writes nothing to the global DB, so poll focus separately.
-    this.focusTimer = setInterval(() => this.followTick(), 2500);
+    this.focusTimer = setInterval(() => this.followTick(), 1000);
   }
 
   dispose() {
@@ -165,8 +178,8 @@ class Inspector {
         case 'ready':
           this.ready = true;
           return this.reload();
-        case 'refresh':
-          return this.reload();
+        case 'refresh': // also jumps to the focused chat, even when not following
+          return this.reload({ refocus: true });
         case 'selectChat':
         case 'openChat': // a subagent, or an ancestor from the breadcrumb
           this.chatId = m.chatId;
@@ -192,11 +205,14 @@ class Inspector {
   }
 
   async followTick() {
-    if (!this.follow || !this.panel.visible || this.ticking) return;
+    if (this.ticking) return;
     this.ticking = true;
     try {
       const db = this.database();
-      const target = (await this.focusedChatId(db)) || (store.listComposers(db, 1)[0] || {}).id;
+      // Track focus even when not following, so refresh can jump to it.
+      const focused = await this.focusedChatId(db);
+      if (!this.follow || !this.panel.visible) return;
+      const target = focused || (store.listComposers(db, 1)[0] || {}).id;
       if (target && (target !== this.chatId || store.lastUpdatedAt(db, target) !== this.loadedAt)) await this.reload();
     } catch {
       // Cursor may be mid-write; the next tick retries.
@@ -205,8 +221,10 @@ class Inspector {
     }
   }
 
-  // The chat focused in this window: Cursor's live pane list, ordered by the
-  // window's focus history. Chats without saved context (new, empty) are skipped.
+  // The chat focused in this window. Cursor exposes only the open panes (in layout
+  // order) live; a chat that just joined them is the one the user switched to.
+  // The stored focus history fills in, but only after Cursor flushes it.
+  // Chats without saved context (new, empty) are skipped.
   async focusedChatId(db) {
     let panes = [];
     try {
@@ -214,16 +232,24 @@ class Inspector {
     } catch {
       // Not Cursor, or the command changed; fall back to stored focus only.
     }
-    const focused = lastFocusedChatIds(this.context);
-    const ordered = [...focused.filter((id) => !panes.length || panes.includes(id)), ...panes];
+    const stored = lastFocusedChatIds(this.context);
+    const bump = (id) => (this.recentChatIds = [id, ...this.recentChatIds.filter((r) => r !== id)]);
+    if (this.panes) panes.filter((id) => !this.panes.includes(id)).forEach(bump);
+    this.panes = panes;
+    if (this.storedHead !== undefined && stored[0] && stored[0] !== this.storedHead) bump(stored[0]);
+    this.storedHead = stored[0] || null;
+    const open = (id) => !panes.length || panes.includes(id);
+    const ordered = [...this.recentChatIds.filter(open), ...stored.filter(open), ...panes];
     return ordered.find((id) => store.hasContext(db, id));
   }
 
-  async reload() {
+  async reload({ refocus = false } = {}) {
     try {
       const db = this.database();
       const chats = store.listComposers(db, 60);
-      if (this.follow || !this.chatId) this.chatId = (await this.focusedChatId(db)) || (chats[0] && chats[0].id);
+      if (this.follow || refocus || !this.chatId) {
+        this.chatId = (await this.focusedChatId(db)) || (refocus && this.chatId) || (chats[0] && chats[0].id);
+      }
       if (!this.chatId) return this.post({ type: 'error', message: 'No Cursor agent chats with context data were found.' });
       const ctx = store.loadContext(db, this.chatId);
       this.loadedAt = ctx.lastUpdatedAt;

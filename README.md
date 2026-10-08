@@ -21,9 +21,13 @@ text itself. This extension shows the exact text behind each row.
   several show **↗ N subagents**). Nested subagents work the same way.
   Subagent chats are left out of the chat dropdown.
 - With **Follow the focused chat** on, the view tracks the chat focused in this
-  window (Cursor's pane list plus the window's focus history) and refreshes as
-  it changes; it falls back to the most recently active chat. Pick any other
-  chat from the dropdown.
+  window and refreshes as it changes; it falls back to the most recently active
+  chat. Switching chat tabs is picked up within about a second (from Cursor's
+  live pane list); focus moves between chats that are already open only show up
+  once Cursor saves its focus history (up to a minute). Pick any other chat from
+  the dropdown.
+- **↻** reloads and jumps to the focused chat, even when not following (e.g.
+  after opening a subagent or picking a chat). The keybinding does the same.
 - The text is shown exactly as the model received it, color-coded (XML tags
   and attributes, markdown markers, code, JSON, tool labels). **Indent**
   visually indents the contents of nested tags; copying still gives the

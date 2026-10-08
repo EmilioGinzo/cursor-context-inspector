@@ -19,10 +19,10 @@ function setup() {
     put(`agentKv:blob:${hash.toString('hex')}`, raw);
     return hash;
   };
-  const save = (lastUpdatedAt, messages) => {
+  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat' } = {}) => {
     const state = Buffer.concat(messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]));
-    put('composerData:chat-1', JSON.stringify({
-      name: 'History chat', lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
+    put(`composerData:${id}`, JSON.stringify({
+      name, lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
       promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] },
     }));
   };
@@ -44,7 +44,7 @@ test('records snapshots, dedupes blobs, keeps messages dropped by summarization'
   save(2000, [sys, summary]);
   assert.strictEqual(history.recordUpdatedSince(db, dir, 1000).recorded, 1);
 
-  const chat = path.join(dir, 'chats', 'chat-1');
+  const chat = path.join(dir, 'chats', 'History chat');
   assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), ['1000.json', '2000.json']);
   assert.strictEqual(fs.readdirSync(path.join(dir, 'blobs')).length, 4, 'system message stored once');
   const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
@@ -126,5 +126,52 @@ test('flat layout from earlier versions is moved under the parent', () => {
   assert.strictEqual(result.migrated, 2);
   assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')), ['root']);
   assert.ok(fs.existsSync(path.join(dir, 'chats', 'root', 'subagents', 'child', 'subagents', 'grandchild', 'snapshots', '1.json')));
-  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).layout, 2);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).layout, 3);
+});
+
+test('folders are named after the chat, follow renames and stay apart on clashes', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys], { id: 'aaaaaaaa-1', name: 'Fix: the "bug" / today?' });
+  save(1000, [first], { id: 'bbbbbbbb-2', name: 'Fix: the "bug" / today?' });
+  history.recordUpdatedSince(db, dir, 0);
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')).sort(), ['Fix- the -bug- - today-', 'Fix- the -bug- - today- (bbbbbbbb)']);
+
+  save(2000, [sys, first], { id: 'aaaaaaaa-1', name: 'Renamed' });
+  history.recordUpdatedSince(db, dir, 1000);
+  const renamed = path.join(dir, 'chats', 'Renamed');
+  assert.deepStrictEqual(fs.readdirSync(path.join(renamed, 'snapshots')).sort(), ['1000.json', '2000.json']);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(renamed, 'meta.json'), 'utf8')).composerId, 'aaaaaaaa-1');
+  assert.strictEqual(history.folderName('..'), 'Untitled chat');
+});
+
+test('folders named by chat id (0.5–0.8.0) are renamed, with links rebuilt', () => {
+  const { db, dir } = multi();
+  db.prepare("UPDATE cursorDiskKV SET value = json_set(value, '$.name', 'Child task') WHERE key = 'composerData:child'").run();
+  history.recordUpdatedSince(db, dir, 0);
+  // Simulate 0.7/0.8.0: same nesting, folders named by id.
+  const root = path.join(dir, 'chats', 'root');
+  fs.renameSync(path.join(root, 'subagents', 'Child task'), path.join(root, 'subagents', 'child'));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 2 }));
+  assert.strictEqual(history.tick(db, dir).migrated, 1);
+  assert.deepStrictEqual(fs.readdirSync(path.join(root, 'subagents')), ['Child task']);
+  assert.ok(fs.existsSync(path.join(root, 'subagents', 'Child task', 'subagents', 'grandchild', 'transcript.md')));
+  assert.match(fs.readFileSync(path.join(root, 'transcript.md'), 'utf8'), /\[Child task\]\(subagents\/Child%20task\/transcript\.md\)/);
+});
+
+test('a chat recorded again by an older window is merged into its named folder', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys]);
+  history.recordUpdatedSince(db, dir, 0);
+  // A window still on 0.8.0 records the next update under the id.
+  const old = path.join(dir, 'chats', 'chat-1');
+  fs.mkdirSync(path.join(old, 'snapshots'), { recursive: true });
+  fs.writeFileSync(path.join(old, 'snapshots', '2000.json'), '{}');
+  fs.writeFileSync(path.join(old, 'meta.json'), JSON.stringify({ composerId: 'chat-1', seen: ['extra'] }));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3 }));
+  assert.strictEqual(history.tick(db, dir).migrated, 1);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')), ['History chat']);
+  assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), ['1000.json', '2000.json']);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8')).seen.includes('extra'));
+  assert.strictEqual(history.tick(db, dir).migrated, 0, 'nothing left to merge');
 });

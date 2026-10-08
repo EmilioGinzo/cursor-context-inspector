@@ -6,7 +6,7 @@
 //
 // <dir>/
 //   blobs/<sha256>.json            prompt message, exactly as Cursor stored it
-//   chats/<chatId>/                one folder per chat (<chat> below)
+//   chats/<chat name>/             one folder per chat (<chat> below); "<name> (<id prefix>)" when names clash
 //   index.json                     chats newest first, each with its subagent tree
 //
 // <chat>/
@@ -14,7 +14,9 @@
 //   snapshots/<lastUpdatedAt>.json token breakdown + the root message hashes at that moment
 //   latest.json                    newest snapshot plus Cursor's usage tree
 //   transcript.md                  every message ever seen, raw text, in order; links subagents
-//   subagents/<subagentId>/        a <chat> for each subagent it spawned (nested to any depth)
+//   subagents/<subagent name>/     a <chat> for each subagent it spawned (nested to any depth)
+//
+// Folders follow renames in Cursor; meta.json's composerId says which chat a folder holds.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -32,18 +34,91 @@ function writeAtomic(file, data) {
   fs.renameSync(tmp, file);
 }
 
-// chats/<root>/subagents/<child>/…/subagents/<composerId>, from Cursor's parent links.
-function chatDirFor(db, dir, composerId) {
-  const chain = [...store.ancestors(db, composerId).map((a) => a.composerId), composerId];
-  return path.join(dir, 'chats', ...chain.flatMap((id, i) => (i === 0 ? [id] : ['subagents', id])));
-}
-
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
     return fallback;
   }
+}
+
+// A chat name made safe as a folder name on any filesystem.
+function folderName(name) {
+  const safe = String(name || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80)
+    .replace(/[. ]+$/, '')
+    .trim();
+  return safe || 'Untitled chat';
+}
+
+// Which chat each folder in `container` holds: meta.json's composerId, or the
+// folder name itself for folders named by id (before 0.8.1). Only new entries are read.
+const ownersCache = new Map();
+function folderOwners(container) {
+  const known = ownersCache.get(container) || new Map();
+  const entries = fs.existsSync(container) ? fs.readdirSync(container) : [];
+  const owners = new Map(entries.map((e) => [e, known.has(e) ? known.get(e) : readJson(path.join(container, e, 'meta.json'), {}).composerId || e]));
+  ownersCache.set(container, owners);
+  return owners;
+}
+
+function chatName(db, composerId) {
+  const row = db.prepare("SELECT json_extract(value, '$.name') AS name FROM cursorDiskKV WHERE key = ?").get(`composerData:${composerId}`);
+  return row ? row.name || 'Untitled chat' : undefined;
+}
+
+// The chat's folder inside `container`, named after the chat. Renames the folder
+// when the chat was renamed; moves `from` (an older location) there when given.
+function placeChat(container, composerId, name, from) {
+  const owners = folderOwners(container);
+  const base = folderName(name);
+  const wanted = owners.has(base) && owners.get(base) !== composerId ? `${base} (${composerId.slice(0, 8)})` : base;
+  const target = path.join(container, wanted);
+  // A window still on an older version may have recorded the chat again in an id-named folder.
+  if (owners.get(wanted) === composerId) return target;
+  let current;
+  for (const [entry, id] of owners) if (id === composerId) current = entry;
+  const source = current !== undefined ? path.join(container, current) : from;
+  if (source) {
+    fs.mkdirSync(container, { recursive: true });
+    fs.renameSync(source, target);
+    owners.delete(current);
+  }
+  owners.set(wanted, composerId);
+  // Without meta.json a folder no longer says which chat it holds.
+  if (!fs.existsSync(path.join(target, 'meta.json'))) writeAtomic(path.join(target, 'meta.json'), JSON.stringify({ composerId, name }, null, 2));
+  return target;
+}
+
+// Moves into `into` whatever `from` has that it lacks, folder by folder, then removes `from`.
+// A placeholder meta.json is replaced; recorded ones join the messages they saw.
+function mergeInto(from, into) {
+  for (const entry of fs.readdirSync(from)) {
+    const src = path.join(from, entry);
+    const dst = path.join(into, entry);
+    if (entry === 'meta.json' && fs.existsSync(dst)) {
+      const kept = readJson(dst, {});
+      const other = readJson(src, {});
+      if (!kept.seen) fs.renameSync(src, dst);
+      else if (other.seen) writeAtomic(dst, JSON.stringify({ ...kept, seen: [...new Set([...kept.seen, ...other.seen])] }, null, 2));
+    } else if (!fs.existsSync(dst)) fs.renameSync(src, dst);
+    else if (fs.statSync(src).isDirectory() && fs.statSync(dst).isDirectory()) mergeInto(src, dst);
+  }
+  fs.rmSync(from, { recursive: true, force: true });
+}
+
+// chats/<root>/subagents/<child>/…/subagents/<chat>, from Cursor's parent links.
+function chatDirFor(db, dir, composerId, name = chatName(db, composerId), from = undefined) {
+  const chain = [...store.ancestors(db, composerId), { composerId, name }];
+  let container = path.join(dir, 'chats');
+  let chatDir;
+  chain.forEach((chat, i) => {
+    chatDir = placeChat(container, chat.composerId, chat.name, i === chain.length - 1 ? from : undefined);
+    container = path.join(chatDir, 'subagents');
+  });
+  return chatDir;
 }
 
 // Record one chat and the subagents it spawned. Returns the number of new snapshots.
@@ -60,7 +135,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   let recorded = 0;
   for (const id of composer.subagentComposerIds || []) recorded += recordChat(db, id, dir, visited);
 
-  const chatDir = chatDirFor(db, dir, composerId);
+  const chatDir = chatDirFor(db, dir, composerId, composer.name || 'Untitled chat');
   const snapshotFile = path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}.json`);
   if (fs.existsSync(snapshotFile)) return recorded;
 
@@ -87,7 +162,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
   const metaFile = path.join(chatDir, 'meta.json');
-  const meta = readJson(metaFile, { composerId, firstRecordedAt: snapshot.recordedAt, seen: [] });
+  const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...readJson(metaFile, {}) };
   const seen = new Set(meta.seen);
   for (const h of hashes) if (!seen.has(h)) meta.seen.push(h);
   Object.assign(meta, {
@@ -110,7 +185,8 @@ function recordChat(db, composerId, dir, visited = new Set()) {
 }
 
 function writeTranscript(db, dir, chatDir, meta, currentHashes) {
-  const subagents = store.loadSubagents(db, meta.subagentIds || []);
+  const folders = new Map([...folderOwners(path.join(chatDir, 'subagents'))].map(([entry, id]) => [id, entry]));
+  const subagents = store.loadSubagents(db, meta.subagentIds || []).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
   writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent));
 }
@@ -121,7 +197,7 @@ function rebuildTranscripts(db, dir) {
   const walk = (chatDir) => {
     const metaFile = path.join(chatDir, 'meta.json');
     const meta = readJson(metaFile, undefined);
-    if (meta) {
+    if (meta && meta.seen) {
       const row = store.getValue(db, `composerData:${meta.composerId}`);
       const composer = row ? JSON.parse(row) : {};
       if (composer.subagentComposerIds) meta.subagentIds = composer.subagentComposerIds;
@@ -141,7 +217,12 @@ function rebuildTranscripts(db, dir) {
   if (fs.existsSync(chatsDir)) for (const id of fs.readdirSync(chatsDir)) walk(path.join(chatsDir, id));
 }
 
-const subLink = (s) => `[${s.name || 'Untitled subagent'}](subagents/${s.composerId}/transcript.md)${s.type ? ` (${s.type})` : ''}`;
+// Subagents Cursor saved no context for have no folder, so no link.
+const subLink = (s) => {
+  const name = s.name || 'Untitled subagent';
+  const link = s.folder ? `[${name}](subagents/${encodeURIComponent(s.folder)}/transcript.md)` : name;
+  return `${link}${s.type ? ` (${s.type})` : ''}`;
+};
 
 function transcript(dir, meta, current, subagents = [], parent) {
   const head = [
@@ -171,25 +252,23 @@ function transcript(dir, meta, current, subagents = [], parent) {
   return `${head.join('\n')}\n${body.join('\n')}`;
 }
 
-// Earlier versions stored subagents as top-level chats; move them under their parent.
+// Earlier versions named folders by chat id (0.5–0.8.0) and stored subagents as
+// top-level chats (0.5–0.6); rename them and move subagents under their parent.
 function migrateLayout(db, dir) {
   const chatsDir = path.join(dir, 'chats');
-  if (!fs.existsSync(chatsDir)) return 0;
   let moved = 0;
-  for (const id of fs.readdirSync(chatsDir)) {
+  const walk = (from, id) => {
     // Parent links come from Cursor's DB: metas written by 0.5 lack parentComposerId.
-    const target = chatDirFor(db, dir, id);
-    if (target === path.join(chatsDir, id)) continue;
-    if (fs.existsSync(path.join(target, 'meta.json'))) continue; // already recorded in place
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (fs.existsSync(target)) {
-      // Only nested subagent folders exist there; bring them along.
-      for (const entry of fs.readdirSync(target)) fs.renameSync(path.join(target, entry), path.join(chatsDir, id, entry));
-      fs.rmdirSync(target);
-    }
-    fs.renameSync(path.join(chatsDir, id), target);
-    moved++;
-  }
+    const name = chatName(db, id) || readJson(path.join(from, 'meta.json'), {}).name;
+    const target = chatDirFor(db, dir, id, name, from);
+    if (target !== from) moved++;
+    // The target already exists: a placeholder holding nested subagents, or the
+    // chat recorded again by a newer window. Either way, combine the two.
+    if (fs.existsSync(from) && target !== from) mergeInto(from, target);
+    const subDir = path.join(target, 'subagents');
+    for (const [entry, subId] of [...folderOwners(subDir)]) walk(path.join(subDir, entry), subId);
+  };
+  for (const [entry, id] of [...folderOwners(chatsDir)]) if (fs.existsSync(path.join(chatsDir, entry))) walk(path.join(chatsDir, entry), id);
   return moved;
 }
 
@@ -238,22 +317,28 @@ function tryLock(dir, staleMs) {
   const now = Date.now();
   const held = readJson(file, undefined);
   if (held && held.pid !== process.pid && now - held.at < staleMs) return false;
+  // Another window may have renamed folders while it held the lock.
+  if (!held || held.pid !== process.pid) ownersCache.clear();
   writeAtomic(file, JSON.stringify({ pid: process.pid, at: now }));
   return true;
 }
+
+// 3: folders named after chats. 2: subagents nested in their parent.
+const LAYOUT = 3;
 
 // Called periodically. First run records the last `backfillDays` of chats.
 function tick(db, dir, { backfillDays = 7, staleMs = 90000 } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
-  const state = readJson(stateFile, { watermark: Date.now() - backfillDays * 86400000, layout: 2 });
-  // Every tick: windows still running an older version may write flat subagent folders.
+  const state = readJson(stateFile, { watermark: Date.now() - backfillDays * 86400000, layout: LAYOUT });
+  // Every tick: windows still running an older version may write id-named or flat folders.
   const migrated = migrateLayout(db, dir);
-  if (migrated || state.layout !== 2) rebuildTranscripts(db, dir);
+  const relayout = migrated || state.layout !== LAYOUT;
+  if (relayout) rebuildTranscripts(db, dir);
   const result = recordUpdatedSince(db, dir, state.watermark);
-  if ((migrated || state.layout !== 2) && !result.recorded) writeIndex(dir);
-  if (migrated || state.layout !== 2 || result.watermark !== state.watermark) writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: 2 }));
+  if (relayout && !result.recorded) writeIndex(dir);
+  if (relayout || result.watermark !== state.watermark) writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT }));
   return { ...result, migrated };
 }
 
-module.exports = { defaultHistoryDir, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex };
+module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex };

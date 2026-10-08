@@ -311,6 +311,99 @@ function treeItems(tree, messages) {
   return out;
 }
 
+// --- coverage (tree mode) ----------------------------------------------------------
+
+// Every string the model received, addressed the way Cursor's tree addresses it.
+function messageLeaves(message) {
+  const c = message.content;
+  if (typeof c === 'string') return [{ path: 'content', text: c }];
+  if (!Array.isArray(c)) return [{ path: 'content', text: asText(c) }];
+  const leaves = [];
+  c.forEach((part, i) => {
+    // Redacted reasoning is the model's encrypted reasoning, passed back verbatim.
+    for (const key of part.type === 'redacted-reasoning' ? ['data'] : ['text', 'args', 'result']) {
+      if (part[key] !== undefined) leaves.push({ path: `content[${i}].${key}`, text: asText(part[key]) });
+    }
+  });
+  return leaves;
+}
+
+// Text that no tree node covers, attributed to a category by its tag. Cursor's
+// tree leaves some sections out (e.g. MCP blocks in the system message); without
+// this they would appear in the raw messages but nowhere in the breakdown.
+function uncoveredItems(tree, messages) {
+  const covered = new Map();
+  for (const n of tree.nodes || []) {
+    const src = n.source;
+    if (!src || src.sourceType !== 'root_prompt_message') continue;
+    const key = `${src.messageIndex}|${src.contentPath}`;
+    if (!covered.has(key)) covered.set(key, []);
+    covered.get(key).push([src.startOffset, src.endOffset]);
+  }
+  const out = {};
+  const add = (cat, item) => (out[cat] = out[cat] || []).push(item);
+
+  messages.forEach((message, mi) => {
+    for (const leaf of messageLeaves(message)) {
+      const ranges = (covered.get(`${mi}|${leaf.path}`) || []).sort((a, b) => a[0] - b[0]);
+      let pos = 0;
+      const gaps = [];
+      for (const [start, end] of ranges) {
+        if (start > pos) gaps.push([pos, start]);
+        pos = Math.max(pos, end);
+      }
+      if (pos < leaf.text.length) gaps.push([pos, leaf.text.length]);
+
+      for (const [start, end] of gaps) {
+        const text = leaf.text.slice(start, end);
+        if (!text.trim()) continue;
+        const where = `#${mi} ${message.role}${leaf.path === 'content' ? '' : ` ${leaf.path}`}`;
+        const fallback = message.role === 'system' ? 'system_prompt'
+          : text.trimStart().startsWith(SUMMARY_PREFIX) ? 'summarized_conversation' : 'conversation';
+        // Cut at tags opening a line; each piece goes to its tag's category. A piece
+        // may be an unclosed fragment (e.g. a section intro whose children the tree has).
+        for (const piece of splitAtTags(text)) {
+          if (!piece.text.trim()) continue;
+          const id = `gap:${mi}:${leaf.path}:${start + piece.start}`;
+          const cat = piece.tag ? classifyTag(piece.tag) : 'conversation';
+          const target = cat === 'conversation' ? fallback : cat;
+          const block = piece.tag && topLevelBlocks(piece.text).find((b) => b.start === 0 && !piece.text.slice(b.end).trim());
+          const label = piece.tag ? `<${piece.tag}>${block ? '' : ' (part)'}`
+            : fallback === 'system_prompt' ? 'System message'
+            : leaf.path.endsWith('.data') ? `Encrypted reasoning · #${mi}` : where;
+          add(target, untracked(block ? blockItem(id, block, label) : textItem(id, label, 'text', piece.text)));
+        }
+      }
+    }
+  });
+  return out;
+}
+
+function splitAtTags(text) {
+  const cuts = [0];
+  const re = /^<([a-z][a-z0-9_-]*)(\s[^>]*)?>/gm;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > 0) cuts.push(m.index);
+    // Skip past a closed block so its nested tags stay inside it.
+    const close = text.indexOf(`</${m[1]}>`, re.lastIndex);
+    if (close !== -1) re.lastIndex = close;
+  }
+  cuts.push(text.length);
+  const pieces = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const piece = text.slice(cuts[i], cuts[i + 1]);
+    const tag = piece.match(/^<([a-z][a-z0-9_-]*)/);
+    pieces.push({ start: cuts[i], text: piece, tag: tag && tag[1] });
+  }
+  return pieces;
+}
+
+function untracked(item) {
+  item.untracked = true;
+  return item;
+}
+
 // --- public ----------------------------------------------------------------------
 
 function loadContext(db, composerId) {
@@ -320,22 +413,25 @@ function loadContext(db, composerId) {
   const messages = loadMessages(db, composer.conversationState);
   const breakdown = composer.promptTokenBreakdown || {};
   const tree = composer.promptContextUsageTree;
-  const parsed = parsedItems(messages);
+  // With a tree: Cursor's exact spans plus whatever text they leave uncovered.
+  // Without one: the prompt split by its tagged sections (covers everything).
   const fromTree = tree ? treeItems(tree, messages) : undefined;
+  const leftover = tree ? uncoveredItems(tree, messages) : {};
+  const parsed = tree ? undefined : parsedItems(messages);
 
   const official = new Map((breakdown.categories || []).map((c) => [c.id, c]));
   const categories = CATEGORY_ORDER.map(([id, label]) => {
-    const treeList = fromTree && fromTree[id];
-    const treeHasText = treeList && treeList.some(hasText);
-    const items = treeHasText || (treeList && id === 'tools') ? treeList : parsed[id];
+    const treeList = (fromTree && fromTree[id]) || [];
+    const treeHasText = treeList.some(hasText);
+    const items = parsed ? parsed[id] : [...(treeHasText || id === 'tools' ? treeList : []), ...(leftover[id] || [])];
     const o = official.get(id);
     if (!treeHasText && o) scaleEstimates(items, o.estimatedTokens);
     return {
       id,
       label: (o && o.label) || label,
       estimatedTokens: o ? o.estimatedTokens : items.reduce((s, i) => s + i.estimatedTokens, 0),
-      source: treeHasText ? 'cursor-tree' : 'parsed',
-      note: id === 'tools' && !(treeList && treeList.length) ? TOOLS_UNAVAILABLE : undefined,
+      source: parsed ? 'parsed' : treeHasText ? 'cursor-tree' : 'uncovered-text',
+      note: id === 'tools' && !treeList.length ? TOOLS_UNAVAILABLE : undefined,
       items,
     };
   });
@@ -378,6 +474,8 @@ function hasText(item) {
 module.exports = {
   defaultDatabasePath,
   openDatabase,
+  getValue,
+  messageText,
   listComposers,
   hasContext,
   lastUpdatedAt,

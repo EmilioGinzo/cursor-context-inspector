@@ -37,6 +37,7 @@
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .tok { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
   .row.dim .name { opacity: .6; }
+  .row .untracked { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--vscode-editorWarning-foreground, #cca700); color: var(--vscode-editorWarning-foreground, #cca700); white-space: nowrap; }
   .children { margin-left: 11px; padding-left: 6px; border-left: 2px solid color-mix(in srgb, var(--cat) 45%, transparent); }
   .sep { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
 
@@ -157,16 +158,17 @@
 
   function item(i) {
     const kids = i.children && i.children.length;
-    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable) +
+    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable, i.untracked) +
       (kids && state.open[i.id] ? `<div class="children">${i.children.map(item).join('')}</div>` : '');
   }
 
-  function row(id, label, tokens, expandable, swatch, dim) {
+  function row(id, label, tokens, expandable, swatch, dim, untracked) {
     const chev = expandable ? (state.open[id] ? '▾' : '▸') : '';
     return `<div class="row${state.selected === id ? ' selected' : ''}${dim ? ' dim' : ''}" data-id="${esc(id)}">` +
       `<span class="chev" data-toggle="1">${chev}</span>` +
       (swatch ? '<span class="sw"></span>' : '') +
       `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
+      (untracked ? '<span class="untracked" title="Not in Cursor’s usage breakdown: the model received this text, but Cursor did not attribute it to a category. Token count is an estimate.">not counted</span>' : '') +
       `<span class="tok">${tokens === undefined ? '' : fmt(tokens)}</span></div>`;
   }
 

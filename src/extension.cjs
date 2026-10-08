@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const vscode = require('vscode');
 const store = require('./cursorStore.cjs');
+const history = require('./history.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
 
@@ -18,7 +19,68 @@ function activate(context) {
   context.subscriptions.push(
     status,
     vscode.commands.registerCommand('cursorContextInspector.open', () => Inspector.show(context)),
+    vscode.commands.registerCommand('cursorContextInspector.openHistory', () => openHistoryFolder()),
+    vscode.commands.registerCommand('cursorContextInspector.recordAllHistory', () => recordAll(context)),
   );
+  startRecorder(context);
+}
+
+function settings() {
+  return vscode.workspace.getConfiguration('cursorContextInspector');
+}
+
+function historyDir() {
+  return settings().get('historyDirectory') || history.defaultHistoryDir();
+}
+
+// Snapshot changed chats every 30 s; one window records, the others skip.
+function startRecorder(context) {
+  if (!settings().get('recordHistory')) return;
+  let db;
+  let lastWrite;
+  const run = () => {
+    try {
+      // Cursor commits through the WAL; unchanged mtime means no chat changed.
+      const dbPath = databasePath(context);
+      const stat = fs.statSync(`${dbPath}-wal`, { throwIfNoEntry: false }) || fs.statSync(dbPath);
+      if (stat.mtimeMs === lastWrite) return;
+      lastWrite = stat.mtimeMs;
+      db = db || store.openDatabase(dbPath);
+      history.tick(db, historyDir(), { backfillDays: settings().get('historyBackfillDays') });
+    } catch (err) {
+      console.error('[context-inspector] history recording failed:', err);
+    }
+  };
+  const first = setTimeout(run, 5000);
+  const timer = setInterval(run, 30000);
+  context.subscriptions.push({ dispose: () => { clearTimeout(first); clearInterval(timer); if (db) db.close(); } });
+}
+
+async function openHistoryFolder() {
+  const dir = historyDir();
+  if (!fs.existsSync(path.join(dir, 'chats'))) {
+    vscode.window.showInformationMessage(`No session history recorded yet in ${dir}.`);
+    return;
+  }
+  await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(path.join(dir, 'index.json')));
+}
+
+async function recordAll(context) {
+  const pick = await vscode.window.showWarningMessage(
+    'Record the history of every Cursor chat on this machine? This copies all their prompt messages into the history folder.',
+    { modal: true },
+    'Record all',
+  );
+  if (pick !== 'Record all') return;
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Recording all chat history…' }, async () => {
+    const db = store.openDatabase(databasePath(context));
+    try {
+      const { recorded } = history.recordUpdatedSince(db, historyDir(), 0);
+      vscode.window.showInformationMessage(`Recorded ${recorded} chat snapshot(s) in ${historyDir()}.`);
+    } finally {
+      db.close();
+    }
+  });
 }
 
 // This window's workspace storage (beside storageUri) records the chats focused in it.
@@ -212,6 +274,7 @@ function skeleton(ctx) {
     estimatedTokens: i.estimatedTokens,
     characterCount: i.characterCount,
     unavailable: i.text === undefined && !i.children,
+    untracked: i.untracked,
     children: i.children && i.children.map(strip),
   });
   return {

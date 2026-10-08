@@ -100,8 +100,29 @@ test('tree mode slices exact spans, including pretty-printed tool args', () => {
   assert.strictEqual(tool.label, 'Shell');
   assert.strictEqual(tool.text, undefined);
   assert.match(tool.unavailable, /not stored/);
-  // Categories the tree does not cover fall back to parsing.
-  assert.strictEqual(byId(ctx, 'system_prompt').source, 'parsed');
+  // Text no tree node covers is attributed by tag and marked untracked.
+  const system = byId(ctx, 'system_prompt');
+  assert.strictEqual(system.source, 'uncovered-text');
+  assert.ok(system.items.every((i) => i.untracked));
+  assert.match(system.items.map((i) => i.text).join(''), /You are an agent/);
+  const mcp = byId(ctx, 'mcp').items;
+  assert.strictEqual(mcp.length, 1);
+  assert.match(mcp[0].text, /^<dynamic_tools>[\s\S]*GetDynamicTools[\s\S]*<\/dynamic_tools>$/);
+  assert.strictEqual(byId(ctx, 'skills').items[0].label, '<agent_skills>', 'uncovered preamble sections land in their category');
+});
+
+test('tree mode accounts for every non-blank character of the prompt', () => {
+  const ctx = store.loadContext(fixture({ withTree: true }), 'chat-1');
+  const shown = [];
+  const walk = (items) => items.forEach((i) => (i.children && !i.untracked ? walk(i.children) : i.text && shown.push(i.text)));
+  ctx.categories.forEach((c) => walk(c.items));
+  const all = shown.join('\n');
+  for (const m of ctx.rawMessages) {
+    for (const line of m.text.split('\n')) {
+      if (line.startsWith('[tool ') || !line.trim()) continue;
+      assert.ok(all.includes(line), `missing from categories: ${line}`);
+    }
+  }
 });
 
 test('listComposers returns chats newest first', () => {

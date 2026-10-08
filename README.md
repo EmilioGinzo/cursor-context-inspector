@@ -23,6 +23,26 @@ text itself. This extension shows the exact text behind each row.
   visually indents the contents of nested tags; copying still gives the
   original text.
 
+## Session history
+
+The extension keeps a local history of agent sessions (setting
+`cursorContextInspector.recordHistory`, on by default). Every 30 s, if Cursor
+wrote anything, one Cursor window snapshots the chats that changed into
+`~/.cursor-context-history` (`cursorContextInspector.historyDirectory`):
+
+| Path | Contents |
+| --- | --- |
+| `chats/<chatId>/transcript.md` | every prompt message ever seen in the chat, raw, in order; messages Cursor later dropped (e.g. by summarizing) are kept and marked |
+| `chats/<chatId>/snapshots/<lastUpdatedAt>.json` | token breakdown and the prompt's message hashes at each update |
+| `chats/<chatId>/latest.json` | newest snapshot plus Cursor's usage tree |
+| `chats/<chatId>/meta.json` | name, model, workspace, message hashes in first-seen order |
+| `blobs/<sha256>.json` | each prompt message once, exactly as Cursor stored it |
+| `index.json` | all recorded chats, newest first |
+
+The first run also records chats from the last
+`cursorContextInspector.historyBackfillDays` (7) days. **Record History of All
+Chats** backfills everything; **Open Session History Folder** opens it.
+
 ## Where the data comes from
 
 Everything is read locally and read-only from Cursor's `state.vscdb`:
@@ -33,7 +53,10 @@ Everything is read locally and read-only from Cursor's `state.vscdb`:
 | `agentKv:blob:<sha256>` | the prompt messages (system, user, assistant, tool) as JSON |
 
 When a chat has Cursor's usage tree, each item is the exact character span
-Cursor counted. Otherwise items come from the prompt's XML-style sections
+Cursor counted. Text the tree leaves out (for example MCP sections in the
+system message, or encrypted reasoning) is still listed, attributed by its tag
+and marked **not counted**, so every character of the prompt appears somewhere
+in the breakdown. Otherwise items come from the prompt's XML-style sections
 (`<rules>`, `<agent_skills>`, `<available_subagent_types>`, `<dynamic_tools>`,
 …). Category token totals always come from Cursor's own numbers. Item
 estimates are Cursor's when it has a tree, otherwise roughly characters / 4.

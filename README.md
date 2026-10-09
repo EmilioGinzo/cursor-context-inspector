@@ -1,112 +1,244 @@
-# Agent Context Inspector
+# Agent Context Inspector (`context-inspector`)
 
-Cursor's **Context Usage** popover shows how many tokens each part of the agent
-context takes (System prompt, Tool definitions, Rules, Skills, MCP & dynamic
-tools, Subagent definitions, Summarized conversation, Conversation), but not the
-text itself. This extension shows the exact text behind each row.
+See the exact text behind each part of Cursor's agent Context Usage, and keep a local history of agent sessions.
 
-## Use
+![The inspector open on a chat: the Context Usage breakdown on the left, the exact system message text on the right](docs/images/inspector.png)
 
-- Click **Context** in the status bar, run **Context Inspector: Inspect Agent
-  Context**, or press `Ctrl+Alt+Shift+C`.
-- The left side mirrors the popover. Click a category to expand it into its
-  items (each rule, skill, MCP server, subagent, message, tool call/result).
-- Click a category or item to see its text on the right. **Find**, **Copy** and
-  **Open in editor** work on whatever is selected.
-- **All prompt messages (raw)** lists every message exactly as stored.
-- **Subagents**: a chat that spawned subagents lists them (name, type, context
-  used). Click one to open its own context breakdown; the breadcrumb above the
-  card leads back to the parent. In the conversation, the tool call/result that
-  spawned a subagent has a **↗** badge that opens it (messages that spawned
-  several show **↗ N subagents**). Nested subagents work the same way.
-  Subagent chats are left out of the chat dropdown.
-- With **Follow the focused chat** on, the view tracks the chat focused in this
-  window and refreshes as it changes; it falls back to the most recently active
-  chat. Switching chat tabs is picked up within about a second (from Cursor's
-  live pane list); focus moves between chats that are already open only show up
-  once Cursor saves its focus history (up to a minute). Pick any other chat from
+Cursor's **Context Usage** popover tells you how many tokens each part of the
+agent's context takes: System prompt, Tool definitions, Rules, Skills, MCP &
+dynamic tools, Subagent definitions, Summarized conversation and Conversation.
+It does not show the text itself. When a rule or skill eats 10K tokens, or a
+summary dropped something important, you cannot see why.
+
+This extension shows the exact text behind every row, item by item, exactly as
+the model received it. It also records every agent chat on your machine into a
+plain folder of Markdown and JSON, so you keep a readable history after Cursor
+summarizes or deletes it.
+
+Everything is read locally and read-only from Cursor's own database. Nothing is
+sent anywhere.
+
+## Contents
+
+- [Requirements](#requirements)
+- [Install and deploy](#install-and-deploy)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Session history](#session-history)
+- [Where the data comes from](#where-the-data-comes-from)
+- [CLI](#cli)
+- [Limitations](#limitations)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Requirements
+
+- [Cursor](https://cursor.com) whose extension host runs Node ≥ 22.5 (the
+  extension uses the built-in `node:sqlite`).
+- To build: Node ≥ 22.5 with `npx`, and the `cursor` command on your `PATH`
+  (Cursor: **Shell Command: Install 'cursor' command**).
+- Tested on Linux. macOS and Windows database paths are detected but untested.
+
+## Install and deploy
+
+The extension is not on a marketplace. You build a `.vsix` package from this
+repository and install it into Cursor.
+
+**1. Get the source and run the tests**
+
+```sh
+git clone git@github.com:EmilioGinzo/cursor-context-inspector.git
+cd cursor-context-inspector
+npm test
+```
+
+All tests pass; there are no npm dependencies to install.
+
+![npm test output: 16 tests, 16 pass, 0 fail](docs/images/deploy-1-test.png)
+
+**2. Package the extension**
+
+```sh
+npx @vscode/vsce package --no-dependencies --allow-missing-repository
+```
+
+This writes `context-inspector-<version>.vsix` to the repository root.
+
+![vsce package output listing the 11 files in the VSIX and "DONE Packaged: context-inspector-0.10.0.vsix"](docs/images/deploy-2-package.png)
+
+**3. Install it into Cursor**
+
+```sh
+cursor --install-extension "context-inspector-$(node -p 'require("./package.json").version').vsix" --force
+```
+
+![cursor --install-extension output: "Extension 'context-inspector-0.10.0.vsix' was successfully installed."](docs/images/deploy-3-install.png)
+
+The Electron `DeprecationWarning` printed after the success line comes from
+the `cursor` CLI and is harmless.
+
+**4. Reload Cursor**
+
+Run **Developer: Reload Window** in every open Cursor window. A **Context**
+button appears in the status bar, and history recording starts a few seconds
+later.
+
+To update, pull and repeat steps 2–4. To remove it:
+
+```sh
+cursor --uninstall-extension local-tools.context-inspector
+```
+
+## Usage
+
+Open the inspector in any of these ways:
+
+- click **Context** in the status bar;
+- run **Context Inspector: Inspect Agent Context** from the Command Palette;
+- press `Ctrl+Alt+Shift+C` (`Cmd+Alt+Shift+C` on macOS).
+
+![The Conversation category expanded with the "User: ping" message selected, showing the user query and the context Cursor attached to it](docs/images/inspector-message.png)
+
+- **Breakdown.** The left side mirrors the Context Usage popover. Click a
+  category to expand it into its items: each rule, skill, MCP server, subagent,
+  message, tool call and tool result.
+- **Text.** Click a category or item to see its text on the right. **Find**,
+  **Copy** and **Open in editor** work on whatever is selected. **All prompt
+  messages (raw)** lists every message exactly as stored.
+- **Exact characters.** Text is shown as the model received it, color-coded
+  (XML tags and attributes, Markdown markers, code, JSON, tool labels).
+  **Indent** visually indents the contents of nested tags; copying still gives
+  the original text.
+- **Folding.** Click the opening of a tag that spans several lines (e.g.
+  `<rules>`) to fold it up to its closing tag; click it or the `⋯ N lines`
+  marker to unfold. Folds nest, are remembered per item, and Find unfolds a
+  section when it jumps to a match inside it.
+- **Subagents.** A chat that spawned subagents lists them (name, type, context
+  used). Click one to open its own breakdown; the breadcrumb above the card
+  leads back to the parent. In the conversation, the tool call that spawned a
+  subagent has a **↗** badge that opens it (**↗ N subagents** when it spawned
+  several). Subagent chats are left out of the chat dropdown.
+- **Follow the focused chat.** When checked, the view tracks the chat focused
+  in this window and refreshes as it changes, falling back to the most
+  recently active chat. Switching chat tabs is picked up within about a
+  second; moving focus between chats that are already open shows up once
+  Cursor saves its focus history (up to a minute). Pick any other chat from
   the dropdown.
-- **↻** reloads and jumps to the focused chat, even when not following (e.g.
-  after opening a subagent or picking a chat). The keybinding does the same.
-- The text is shown exactly as the model received it, color-coded (XML tags
-  and attributes, markdown markers, code, JSON, tool labels). **Indent**
-  visually indents the contents of nested tags; copying still gives the
-  original text.
-- Click the opening of a tag that spans several lines (e.g. `<rules>`) to fold
-  everything up to its closing tag; click it or the `⋯ N lines` marker again
-  to unfold. Folds nest, are remembered per item, and Find unfolds a section
-  when it jumps to a match inside it.
+- **↻** reloads and jumps to the focused chat, even when not following. The
+  keybinding does the same.
+
+## Configuration
+
+All settings are under **Settings → Extensions → Agent Context Inspector**.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `cursorContextInspector.databasePath` | `""` | Path to Cursor's `state.vscdb`. Empty detects it automatically. |
+| `cursorContextInspector.showStatusBarItem` | `true` | Show the **Context** button in the status bar. |
+| `cursorContextInspector.recordHistory` | `true` | Keep a local history of agent sessions (see below). |
+| `cursorContextInspector.historyDirectory` | `""` | Where history is stored. Empty means `~/.cursor-context-history`. |
+| `cursorContextInspector.historyBackfillDays` | `0` | Also record older chats updated in this many past days; `0` records every chat Cursor still has. |
 
 ## Session history
 
-The extension keeps a local history of agent sessions (setting
-`cursorContextInspector.recordHistory`, on by default). Every 30 s, if Cursor
-wrote anything, one Cursor window snapshots the chats that changed into
-`~/.cursor-context-history` (`cursorContextInspector.historyDirectory`):
+Every 30 s, if Cursor wrote anything, one Cursor window snapshots the chats
+that changed into `~/.cursor-context-history`:
 
 | Path | Contents |
 | --- | --- |
-| `chats/<chat name>/chat.md` | the conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages |
-| `chats/<chat name>/transcript.md` | every prompt message ever seen in the chat, raw, in order; messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned |
-| `chats/<chat name>/snapshots/<lastUpdatedAt>.json` | token breakdown and the prompt's message hashes at each update |
-| `chats/<chat name>/latest.json` | newest snapshot plus Cursor's usage tree |
-| `chats/<chat name>/meta.json` | name, model, workspace, message hashes in first-seen order |
-| `chats/<chat name>/subagents/<subagent name>/` | the same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent |
-| `blobs/<sha256>.json` | each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading) |
-| `index.json` | all recorded chats, newest first, each with its subagent tree |
+| `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages. |
+| `chats/<chat name>/transcript.md` | Every prompt message ever seen in the chat, raw, in order. Messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned. |
+| `chats/<chat name>/snapshots/<lastUpdatedAt>.json` | Token breakdown and the prompt's message hashes at each update. |
+| `chats/<chat name>/latest.json` | Newest snapshot plus Cursor's usage tree. |
+| `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order. |
+| `chats/<chat name>/subagents/<subagent name>/` | The same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent. |
+| `blobs/<sha256>.json` | Each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading). |
+| `index.json` | All recorded chats, newest first, each with its subagent tree. |
 
-Folders are named after the chat, with characters that are not valid in file
-names replaced by `-`. When two chats share a name, the later one gets the
-first 8 characters of its id appended, e.g. `Ping request (a9ed13b2)`. A
-folder is renamed when its chat is renamed in Cursor; `meta.json` holds the
-chat id.
-
-A chat's subagents are recorded together with it. Folders written by earlier
-versions (named by chat id, or subagents at the top level) are renamed and
-moved under their parent automatically.
-
-Older chats are recorded too: every chat Cursor still has, caught up in the
-background 50 at a time every 5 s (a few minutes for a couple of thousand
-chats). Set `cursorContextInspector.historyBackfillDays` to keep only the last
-that many days. Chats that were opened but never sent are skipped. **Record
-History of All Chats** records everything at once; **Open Session History
-Folder** opens the folder.
+- **Folder names** follow the chat name, with characters that are not valid
+  in file names replaced by `-`. When two chats share a name, the later one
+  gets the first 8 characters of its id appended, e.g.
+  `Ping request (a9ed13b2)`. A folder is renamed when its chat is renamed.
+  Folders written by earlier versions (named by id, or subagents at the top
+  level) are renamed and moved automatically.
+- **Older chats** are caught up in the background, 50 every 5 s (a few
+  minutes for a couple of thousand chats). Chats opened but never sent are
+  skipped. Expect the full history to take a few GB if you have thousands of
+  chats; set `historyBackfillDays` to limit it.
+- **Commands:** **Record History of All Chats** records everything at once;
+  **Open Session History Folder** opens the folder.
 
 ## Where the data comes from
 
-Everything is read locally and read-only from Cursor's `state.vscdb`:
+The extension opens Cursor's `state.vscdb` read-only:
 
 | Key | Contents |
 | --- | --- |
-| `composerData:<chatId>` | the popover numbers (`promptTokenBreakdown`), Cursor's per-item usage tree (`promptContextUsageTree`, newer chats) and `conversationState` |
-| `agentKv:blob:<sha256>` | the prompt messages (system, user, assistant, tool) as JSON |
+| `composerData:<chatId>` | The popover numbers (`promptTokenBreakdown`), Cursor's per-item usage tree (`promptContextUsageTree`, newer chats) and `conversationState`. |
+| `agentKv:blob:<sha256>` | The prompt messages (system, user, assistant, tool) as JSON. |
 
 When a chat has Cursor's usage tree, each item is the exact character span
 Cursor counted. Text the tree leaves out (for example MCP sections in the
 system message, or encrypted reasoning) is still listed, attributed by its tag
-and marked **not counted**, so every character of the prompt appears somewhere
-in the breakdown. Otherwise items come from the prompt's XML-style sections
-(`<rules>`, `<agent_skills>`, `<available_subagent_types>`, `<dynamic_tools>`,
-…). Category token totals always come from Cursor's own numbers. Item
-estimates are Cursor's when it has a tree, otherwise roughly characters / 4.
+and marked **not counted**, so every character of the prompt appears somewhere.
+Without a tree, items come from the prompt's XML-style sections (`<rules>`,
+`<agent_skills>`, `<available_subagent_types>`, `<dynamic_tools>`, …).
 
-**Tool definitions are not stored locally.** Cursor's backend attaches them,
-so only each tool's name and token estimate are available.
+Category totals always come from Cursor's own numbers. Item estimates are
+Cursor's when it has a tree, otherwise roughly characters / 4.
 
 ## CLI
 
+The same breakdown is available from a terminal, without Cursor running:
+
 ```sh
 node bin/cursor-context.cjs --list                    # recent chats
-node bin/cursor-context.cjs                           # breakdown of latest chat
+node bin/cursor-context.cjs                           # breakdown of the latest chat
 node bin/cursor-context.cjs --chat <id> --show rules  # text of a category or item id
+node bin/cursor-context.cjs --db <path>               # use another state.vscdb
 ```
+
+```text
+Ping request  [9f37163b-346e-42d7-8f95-622e23613f9b]  model=composer-2.5  tree=false  messages=6
+26.3K / 200.0K tokens
+  System prompt                  465      1 items      1974 chars  (parsed)
+  Tool definitions              3.6K      0 items         0 chars  (parsed)
+  Rules                        10.8K      1 items     39298 chars  (parsed)
+  ...
+```
+
+## Limitations
+
+- **Tool definitions are not stored locally.** Cursor's backend attaches
+  them, so only each tool's name and token estimate are shown.
+- The extension reads undocumented Cursor storage. A Cursor update can change
+  it; open an issue if a category comes up empty.
+- The history folder contains everything your chats contain, including any
+  secrets pasted into them. Treat it like the chats themselves.
 
 ## Development
 
-```sh
-npm test
-npx @vscode/vsce package --no-dependencies --allow-missing-repository
-cursor --install-extension context-inspector-0.1.0.vsix
+```text
+src/extension.cjs     activation, commands, webview panel, history timer
+src/cursorStore.cjs   reads state.vscdb and builds the context breakdown
+src/history.cjs       session history recorder and backfill
+src/chatMarkdown.cjs  renders chat.md
+media/inspector.html  the webview UI
+bin/cursor-context.cjs  CLI
+test/                 node:test suites (npm test)
 ```
 
-Requires Cursor's extension host Node ≥ 22.5 (for `node:sqlite`).
+Run `npm test` before packaging. To try a change, package and install it as in
+[Install and deploy](#install-and-deploy), then reload the window.
+
+## Contributing
+
+This is a personal tool in a private repository. Questions and bug reports go
+to the repository's GitHub issues; pull requests are welcome from
+collaborators. Please include a test for behavior changes and keep `npm test`
+green.
+
+## License
+
+[MIT](LICENSE) © 2026 Emilio Ginzo

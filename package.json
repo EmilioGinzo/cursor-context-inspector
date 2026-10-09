@@ -6,6 +6,10 @@
   "publisher": "local-tools",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EmilioGinzo/cursor-context-inspector.git"
+  },
   "engines": {
     "vscode": "^1.95.0",
     "node": ">=22.5"

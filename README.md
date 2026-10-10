@@ -151,6 +151,7 @@ that changed into `~/.cursor-context-history`:
 | `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages. |
 | `chats/<chat name>/transcript.md` | Every prompt message ever seen in the chat, raw, in order. Messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned. |
 | `chats/<chat name>/snapshots/<lastUpdatedAt>.json` | Token breakdown and the prompt's message hashes at each update. |
+| `chats/<chat name>/snapshots/<lastUpdatedAt>-<n>.json` | The first `n` of those hashes: a state the chat went through before that update. Cursor keeps only the newest state, but each assistant message was written by a model call that saw exactly the messages before it (`"state": "prompt"`), and a turn ended before each user message that follows the agent (`"turn end"`). Not derived across a summary, which rewrites the prompt. |
 | `chats/<chat name>/latest.json` | Newest snapshot plus Cursor's usage tree. |
 | `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order. |
 | `chats/<chat name>/subagents/<subagent name>/` | The same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent. |

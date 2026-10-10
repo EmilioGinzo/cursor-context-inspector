@@ -810,25 +810,39 @@ function extractSchema(appDir = DEFAULT_APP_DIR) {
 function writeAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
 }
+
+// Bumped whenever the extractor's output changes, so caches written by an
+// older extractor are not reused.
+const CACHE_FORMAT = 2;
 
 function cacheFile(appDir, cacheDir) {
   const { version, commit } = readProduct(appDir);
   if (!version || !commit) return null;
-  return path.join(cacheDir, `${version}-${commit}.json`);
+  return path.join(cacheDir, `${version}-${commit}.v${CACHE_FORMAT}.json`);
 }
 
-function loadSchema({ appDir = DEFAULT_APP_DIR, cacheDir = DEFAULT_CACHE_DIR } = {}) {
+// fresh: re-extract even when cached (and refresh the cache).
+function loadSchema({ appDir = DEFAULT_APP_DIR, cacheDir = DEFAULT_CACHE_DIR, fresh = false } = {}) {
   const file = cacheFile(appDir, cacheDir);
-  if (file) {
+  if (file && !fresh) {
     try {
       return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch { /* not cached yet */ }
   }
   const schema = extractSchema(appDir);
-  if (file) writeAtomic(file, JSON.stringify(schema));
+  if (file) {
+    try {
+      writeAtomic(file, JSON.stringify(schema));
+    } catch { /* an unwritable cache only costs the next run its time */ }
+  }
   return schema;
 }
 

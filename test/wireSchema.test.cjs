@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { extractSchema, loadSchema, parseValue } = require('../src/wire/schema.cjs');
+const { extractSchema, loadSchema, cacheFile, parseValue } = require('../src/wire/schema.cjs');
 
 // Small hand-written imitations of each pattern Cursor's bundles use.
 
@@ -216,12 +216,26 @@ test('skips node_modules and files without protobuf code', () => {
 test('loadSchema caches per Cursor version and commit', () => {
   const app = makeApp({ 'out/w.js': 'var C={};A=C.makeMessageType("pkg.v1.First",()=>[]);' });
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-schema-cache-'));
+  const file = cacheFile(app, cacheDir);
+  assert.match(path.basename(file), /^9\.9\.9-abc123\.v\d+\.json$/);
   const first = loadSchema({ appDir: app, cacheDir });
-  assert.ok(fs.existsSync(path.join(cacheDir, '9.9.9-abc123.json')));
+  assert.ok(fs.existsSync(file));
   fs.writeFileSync(path.join(app, 'out/w.js'), 'var C={};A=C.makeMessageType("pkg.v1.Second",()=>[]);');
   assert.deepStrictEqual(loadSchema({ appDir: app, cacheDir }), first);
   assert.deepStrictEqual(Object.keys(first.messages), ['pkg.v1.First']);
-  assert.deepStrictEqual(fs.readdirSync(cacheDir), ['9.9.9-abc123.json'], 'no temp files left');
+  assert.deepStrictEqual(fs.readdirSync(cacheDir), [path.basename(file)], 'no temp files left');
+
+  // fresh re-extracts and refreshes the cache.
+  assert.deepStrictEqual(Object.keys(loadSchema({ appDir: app, cacheDir, fresh: true }).messages), ['pkg.v1.Second']);
+  assert.deepStrictEqual(Object.keys(loadSchema({ appDir: app, cacheDir }).messages), ['pkg.v1.Second']);
+});
+
+test('loadSchema still returns the schema when the cache cannot be written', () => {
+  const app = makeApp({ 'out/w.js': 'var C={};A=C.makeMessageType("pkg.v1.First",()=>[]);' });
+  const blocker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wire-schema-cache-')), 'file');
+  fs.writeFileSync(blocker, '');
+  const s = loadSchema({ appDir: app, cacheDir: path.join(blocker, 'sub') });
+  assert.deepStrictEqual(Object.keys(s.messages), ['pkg.v1.First']);
 });
 
 test('parseValue reads the literals generated code uses', () => {

@@ -4,7 +4,8 @@
 // CLI: extract Cursor's protobuf schema from its JS bundles.
 //   cursor-wire-schema [--app <dir>] [--cache <dir>] [--fresh] [--out <file|->]
 // Prints a summary; --out writes the schema JSON (- for stdout).
-// Cached in ~/.cursor-wire/schema/<version>-<commit>.json; --fresh re-extracts.
+// Cached in ~/.cursor-wire/schema/<version>-<commit>.v<format>.json; --fresh
+// re-extracts and refreshes the cache.
 
 const fs = require('node:fs');
 const schemaLib = require('../src/wire/schema.cjs');
@@ -24,9 +25,7 @@ if (!fs.existsSync(appDir)) {
 }
 
 const started = Date.now();
-const schema = args.includes('--fresh')
-  ? schemaLib.extractSchema(appDir)
-  : schemaLib.loadSchema({ appDir, cacheDir });
+const schema = schemaLib.loadSchema({ appDir, cacheDir, fresh: args.includes('--fresh') });
 const ms = Date.now() - started;
 
 if (out === '-') {

@@ -6,7 +6,8 @@
 // cursor-context wire compare [<chat name | composerId prefix>] [--day D] [--json] [--clip N | --full]
 //                             [--history dir] [--db state.vscdb | --no-db] [--record-now]
 // --record-now compares against a fresh record: the plugin's own recordChat run now, on Cursor's DB,
-// into a temporary history folder (the real history is not touched).
+// into a temporary history folder (the real history is not touched). It also rebuilds the context
+// sent beside the prompt for every user message, from the files as they are now.
 // <flow> is a flow directory, or its name (e.g. 101500-00002-aiserver.v1.AiService_ServerTime, or a
 // unique part of it). An index into the `wire ls` listing (with the same --day/--grep) also works,
 // but shifts while the proxy is recording.
@@ -136,7 +137,8 @@ async function run(argv, out = process.stdout) {
         if (!db) throw new Error('--record-now needs Cursor\'s DB');
         const history = require('../history.cjs');
         fresh = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cursor-context-record-'));
-        for (const c of rebuilt.conversations) history.recordChat(db, c.conversationId, fresh);
+        const sentContext = { enabled: true, maxAgeMs: Infinity, appDir: opts.app, cache: new Map() };
+        for (const c of rebuilt.conversations) history.recordChat(db, c.conversationId, fresh, undefined, { sentContext });
         historyDir = fresh;
       }
       const results = compareLib.compare({ conversations: rebuilt.conversations, historyDir, db, ref });

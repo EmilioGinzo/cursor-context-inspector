@@ -14,6 +14,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { sha256 } = require('./conversation.cjs');
 const { userBlocks } = require('../chatMarkdown.cjs');
+const requestContext = require('../requestContext.cjs');
+const sentContextLib = require('../sentContext.cjs');
 
 const SUMMARY_PREFIX = '[Previous conversation summary]';
 const MIN_LEAF = 24; // shorter wire strings (ids, flags, paths) are too common to look for in the record
@@ -26,10 +28,10 @@ const ASSUMPTIONS = {
   'user-text': "chat.md's user text (the <user_query> block, or untagged text) is what the user sent",
   'agent-text': 'the recorded assistant messages hold the text and thinking the model streamed',
   'tool-calls': 'every tool call and its result is in the record, under the same tool call id',
-  'request-context': 'the context sent with a user message (rules, files, environment) is in the recorded prompt',
+  'request-context': 'the context sent with a user message (rules, files, environment) is in the record: the prompt, or the recorded context parts',
   'summary': `a summary is a user message starting with "${SUMMARY_PREFIX}" or a <summary> block; summarized messages leave the prompt`,
   'subagent-link': "a subagent belongs to the parent tool call whose id prefix-matches its subagentInfo.toolCallId",
-  'tools-backend': 'tool definitions are attached by the backend; the client does not send them',
+  'tools-backend': 'the tool definitions the client sends (MCP tools) are in the recorded context parts; the backend attaches the others',
 };
 
 // --- plugin side -------------------------------------------------------------------------
@@ -98,7 +100,13 @@ function loadRecord(historyDir, chat, db) {
   };
   // thinking.json: the readable thinking from Cursor's turn steps, placed on recorded messages.
   const thinking = readJson(path.join(dir, 'thinking.json'), []);
-  const rec = { dir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), thinking, blob };
+  // The context recorded as sent beside the prompt, per user message (sentContext.cjs).
+  const parts = new Map();
+  const part = (kind, id) => {
+    if (!parts.has(id)) parts.set(id, sentContextLib.loadPart(historyDir, kind, id));
+    return parts.get(id);
+  };
+  const rec = { dir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), thinking, blob, sentContext: meta.sentContext || [], part };
   if (db) rec.db = dbSide(db, meta.composerId);
   return rec;
 }
@@ -242,13 +250,6 @@ function compareRun(run, rec, ctx) {
     if (!b.sha256Ok) add('wire-blob-hash-mismatch', 'root-hashes', { id: b.id, sources: b.sources.map((s) => s.how), size: b.data.length });
     if (b.conflicts) add('wire-blob-sent-twice-differently', 'root-hashes', { id: b.id, sources: b.sources.map((s) => s.how) });
   }
-  // Context sent only as a blob id (request_context_parts): unless its bytes travelled, neither the
-  // wire nor the record shows what the server used.
-  for (const r of run.refs) {
-    if (/^context_/.test(r.ref) && !run.blobs.has(r.id)) {
-      add('context-sent-by-reference', 'request-context', { ref: r.ref, id: r.id, bytes: r.bytes, inDb: rec.db && rec.db.found ? rec.db.hasBlob(r.id) : undefined });
-    }
-  }
   for (const e of run.server) if (e.kind === 'kv_get_blob_args' && e.missingOnClient) add('server-asked-blob-client-lacked', 'complete-record', { id: e.blobId, where: e.where });
 
   // The prompt: every id of every state the wire carried, against the record.
@@ -279,6 +280,7 @@ function compareRun(run, rec, ctx) {
   const addedMsgs = added.map((id) => ({ id, m: message(id) })).filter((x) => x.m);
   out.added = addedMsgs.map(({ id, m }) => ({ id, role: m.role, parts: parts(m).map((p) => p.type) }));
 
+  checkContextParts(run, rec, added, add, ctx, out);
   checkUserText(run, addedMsgs, add, ctx);
   checkAgentStream(run, addedMsgs, add, rec);
   checkTools(run, addedMsgs, add);
@@ -431,7 +433,94 @@ function checkRequestContext(run, rec, add, ctx) {
   const contexts = [((run.action.value || {}).request_context), (run.action.requestContextParts || {}).dynamic_context,
     ...run.client.filter((x) => x.kind === 'exec_result' && x.op === 'request_context_result').map((x) => x.result.success && x.result.success.request_context)];
   const tools = [...((run.request && run.request.mcp_tools && run.request.mcp_tools.mcp_tools) || []), ...contexts.flatMap((c) => (c && c.tools) || [])];
-  if (tools.length) add('client-sent-tool-definitions', 'tools-backend', { count: tools.length, names: tools.map((x) => x.name || x.tool_name) });
+  // Recorded when a recorded MCP part has the tool with the same description and schema.
+  const recorded = recordedTools(rec);
+  const same = (x) => recorded.some((y) => y.name === (x.name || x.tool_name) && (x.description === undefined || x.description === y.description) && (x.input_schema_json === undefined || x.input_schema_json === y.input_schema_json));
+  const missing = tools.filter((x) => !same(x));
+  if (missing.length) add('client-sent-tool-definitions', 'tools-backend', { count: missing.length, of: tools.length, names: missing.map((x) => x.name || x.tool_name) });
+}
+
+// The context parts a run refers to by id (request_context_parts), against the parts recorded for
+// its user message: the same sha256 means the record holds exactly the bytes the client sent.
+function checkContextParts(run, rec, added, add, ctx, out) {
+  const entry = recordedEntryFor(rec, added);
+  for (const r of run.refs) {
+    const kind = (/^context_(\w+)$/.exec(r.ref) || [])[1];
+    if (!kind || run.blobs.has(r.id)) continue;
+    const recorded = entry && entry.parts && entry.parts[kind];
+    const wire = ctx.wireParts.get(r.id);
+    if (!recorded) {
+      add('context-sent-by-reference', 'request-context', { ref: r.ref, id: r.id, bytes: r.bytes, wireBytesKnown: !!wire, inDb: rec.db && rec.db.found ? rec.db.hasBlob(r.id) : undefined });
+      continue;
+    }
+    (out.contextParts = out.contextParts || []).push({ kind, id: r.id, bytes: r.bytes, recordedId: recorded.id, same: recorded.id === r.id });
+    if (recorded.id === r.id) continue;
+    const mine = rec.part(kind, recorded.id);
+    add('context-part-differs', 'request-context', {
+      ref: r.ref, id: r.id, bytes: r.bytes, recordedId: recorded.id, recordedBytes: recorded.bytes, rebuiltAfterMs: entry.rebuiltAt - entry.messageAt,
+      wireBytesKnown: !!wire, items: wire && mine ? partDiff(kind, wire.part, mine.part) : undefined,
+    });
+  }
+}
+
+// The recorded context entry of a run's user message, else the chat's latest one.
+function recordedEntryFor(rec, added) {
+  const list = rec.sentContext || [];
+  return list.find((e) => (e.messages || []).some((h) => added.includes(h))) || list[list.length - 1];
+}
+
+// Two versions of a part, item by item (keyed by path or name): what is missing, extra, changed.
+function partDiff(kind, wire, mine) {
+  const out = { missing: [], extra: [], changed: [], orderDiffers: false, otherFields: [] };
+  const lists = Object.keys({ ...wire, ...mine }).filter((k) => !k.startsWith('_'));
+  for (const k of lists) {
+    const a = wire[k];
+    const b = mine[k];
+    if (!Array.isArray(a) && !Array.isArray(b)) {
+      if (JSON.stringify(a) !== JSON.stringify(b)) out.otherFields.push(k);
+      continue;
+    }
+    const key = (x) => x.full_path || x.name || x.server_identifier || JSON.stringify(x);
+    const A = new Map((a || []).map((x) => [key(x), x]));
+    const B = new Map((b || []).map((x) => [key(x), x]));
+    for (const [id, x] of A) {
+      if (!B.has(id)) out.missing.push(`${k}: ${id}`);
+      else {
+        const y = B.get(id);
+        const fields = [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((f) => !f.startsWith('_') && JSON.stringify(x[f]) !== JSON.stringify(y[f]));
+        if (fields.length) out.changed.push({ item: `${k}: ${id}`, fields });
+      }
+    }
+    for (const id of B.keys()) if (!A.has(id)) out.extra.push(`${k}: ${id}`);
+    const common = [...A.keys()].filter((id) => B.has(id));
+    if (common.join('\n') !== [...B.keys()].filter((id) => A.has(id)).join('\n')) out.orderDiffers = true;
+  }
+  return out;
+}
+
+// The parts the client sent whole (a request_context inline, on a chat's first message), split
+// and encoded the way the client does: id -> { kind, part }. Follow-ups refer to them by id.
+function wirePartsOf(conv) {
+  const out = new Map();
+  for (const run of conv.runs) {
+    const rcx = run.action && run.action.value && run.action.value.request_context;
+    if (!rcx) continue;
+    const split = {
+      rules: { rules: rcx.rules, non_file_rules: rcx.non_file_rules, cloud_rule: rcx.cloud_rule },
+      skills: { agent_skills: rcx.agent_skills, skill_options: rcx.skill_options },
+      subagents: { custom_subagents: rcx.custom_subagents },
+      mcps: { tools: rcx.tools, mcp_instructions: rcx.mcp_instructions, mcp_file_system_options: rcx.mcp_file_system_options, mcp_meta_tool_options: rcx.mcp_meta_tool_options },
+    };
+    for (const kind of requestContext.PARTS) {
+      try {
+        const data = requestContext.encode(requestContext.PART_TYPES[kind], split[kind]);
+        out.set(requestContext.sha256(data), { kind, part: requestContext.decodePart(kind, data) });
+      } catch {
+        /* a field this plugin does not know: the part cannot be rebuilt from the wire */
+      }
+    }
+  }
+  return out;
 }
 
 function checkSummary(run, before, after, message, add, out) {
@@ -454,11 +543,12 @@ function compareConversation(conv, rec) {
     recordedText: (() => {
       let cache;
       return () => {
-        if (cache === undefined) cache = rec ? rec.seen.map((h) => (rec.blob(h) ? rec.blob(h).data.toString('utf8') + '\n' + textOf(rec.blob(h).message) : '')).join('\n') : '';
+        if (cache === undefined) cache = rec ? [...rec.seen.map((h) => (rec.blob(h) ? rec.blob(h).data.toString('utf8') + '\n' + textOf(rec.blob(h).message) : '')), ...recordedPartStrings(rec)].join('\n') : '';
         return cache;
       };
     })(),
   };
+  ctx.wireParts = wirePartsOf(conv);
   const report = { conversationId: conv.conversationId, runs: [], findings: [], related: conv.related.map((r) => r.flow.rpc) };
   if (!rec) {
     report.chat = null;
@@ -486,6 +576,26 @@ function compareConversation(conv, rec) {
   checkSubagents(conv, rec, report);
   report.assumptions = rate(report, ctx);
   return report;
+}
+
+function recordedTools(rec) {
+  if (!rec) return [];
+  const ids = new Set((rec.sentContext || []).map((e) => e.parts && e.parts.mcps && e.parts.mcps.id).filter(Boolean));
+  return [...ids].flatMap((id) => {
+    const p = rec.part('mcps', id);
+    return (p && p.part.tools) || [];
+  });
+}
+
+// Every string of every context part recorded for the chat.
+function recordedPartStrings(rec) {
+  const ids = new Map();
+  for (const e of rec.sentContext || []) for (const [kind, p] of Object.entries(e.parts || {})) ids.set(p.id, kind);
+  const dynamic = (rec.sentContext || []).flatMap((e) => sentContextLib.partStrings(e.dynamic));
+  return [...[...ids].flatMap(([id, kind]) => {
+    const p = rec.part(kind, id);
+    return p ? sentContextLib.partStrings(p.part) : [];
+  }), ...new Set(dynamic)];
 }
 
 function textOf(m) {

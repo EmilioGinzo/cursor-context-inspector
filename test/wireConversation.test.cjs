@@ -492,3 +492,62 @@ test('compare: a read\'s path the model gets in the call, not the result, is no 
   ]);
   assert.strictEqual(verdict(r, 'tool-calls'), 'holds');
 });
+
+// The record of the context sent beside the prompt (sentContext.cjs): parts under context/, an
+// entry in meta.json for the user message.
+function recordParts(history, parts, messages) {
+  const encoded = require('../src/requestContext.cjs').encodeParts(parts);
+  fs.mkdirSync(path.join(history, 'context'), { recursive: true });
+  for (const p of Object.values(encoded)) fs.writeFileSync(path.join(history, 'context', `${p.id}.bin`), p.data);
+  const metaFile = path.join(history, 'chats', 'Files', 'meta.json');
+  const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  meta.sentContext = [{ messages, messageAt: 1, rebuiltAt: 2, parts: Object.fromEntries(Object.entries(encoded).map(([k, p]) => [k, { id: p.id, bytes: p.bytes, items: 1 }])) }];
+  fs.writeFileSync(metaFile, JSON.stringify(meta));
+  return encoded;
+}
+
+test('compare: context parts sent by id are checked against the recorded parts, item by item', (t) => {
+  const { wire, history } = tmp(t);
+  const rc = require('../src/requestContext.cjs');
+  const tool = { name: 'srv-search', provider_identifier: 'srv', tool_name: 'search', description: 'Searches the team wiki for a query.', input_schema_json: '{"type":"object"}' };
+  const other = { full_path: '/repo/.cursor/rules/other.mdc', content: 'Another rule the client had, long enough to be content.' };
+  const sent = { rules: { rules: [{ full_path: RULE_PATH, content: RULE }, other] }, mcps: { tools: [tool] } };
+  const sentIds = rc.encodeParts(sent);
+  // First message: the context inline and by id; the follow-up: by id only.
+  const parts = { rules_blob_id: Buffer.from(sentIds.rules.id, 'hex'), rules_byte_length: sentIds.rules.bytes, mcps_blob_id: Buffer.from(sentIds.mcps.id, 'hex'), mcps_byte_length: sentIds.mcps.bytes };
+  const { clientMsgs, serverMsgs } = turnMessages();
+  clientMsgs[0] = client({ run_request: {
+    conversation_id: CID, conversation_state: { root_prompt_messages_json: ids('sys', 'u0', 'a0') },
+    action: { user_message_action: { user_message: { text: 'list the files' }, request_context: { rules: sent.rules.rules, tools: [tool] } }, request_context_parts: parts },
+  } });
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
+  writeFlow(wire, '100001-00002-agent.v1.AgentService_Run', {
+    url: 'https://x/agent.v1.AgentService/Run', started: 2,
+    reqBody: stream([client({ run_request: { conversation_id: CID, conversation_state: { root_prompt_messages_json: ids('sys', 'u0', 'a0', 'u1', 'a1', 't1', 'a2') },
+      action: { user_message_action: { user_message: { message_id: 'm2' } }, request_context_parts: parts } } })], false),
+    respBody: stream([]),
+  });
+
+  // Recorded exactly: no finding, the tools count as recorded, the inline context is in the record.
+  writeRecord(history);
+  recordParts(history, sent, [M.u1.hex]);
+  let [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  assert.deepStrictEqual(r.runs.map((x) => x.contextParts.map((c) => [c.kind, c.same])), [[['rules', true], ['mcps', true]], [['rules', true], ['mcps', true]]]);
+  assert.deepStrictEqual(kinds(r), []);
+  assert.strictEqual(verdict(r, 'request-context'), 'holds');
+  assert.strictEqual(verdict(r, 'tools-backend'), 'holds');
+
+  // Recorded without one rule and with another tool description: told apart item by item.
+  writeRecord(history);
+  recordParts(history, { rules: { rules: [{ full_path: RULE_PATH, content: RULE }] }, mcps: { tools: [{ ...tool, description: 'Something else entirely.' }] } }, [M.u1.hex]);
+  [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  const diffs = r.runs[1].findings.filter((f) => f.kind === 'context-part-differs');
+  assert.deepStrictEqual(diffs.map((f) => [f.ref, f.id, f.wireBytesKnown, f.items]), [
+    ['context_rules', sentIds.rules.id, true, { missing: [`rules: ${other.full_path}`], extra: [], changed: [], orderDiffers: false, otherFields: [] }],
+    ['context_mcps', sentIds.mcps.id, true, { missing: [], extra: [], changed: [{ item: 'tools: srv-search', fields: ['description'] }], orderDiffers: false, otherFields: [] }],
+  ]);
+  assert.deepStrictEqual(r.runs[0].findings.filter((f) => f.kind === 'sent-context-not-in-record').map((f) => f.path), [
+    'user_message_action.request_context.rules[1].full_path', 'user_message_action.request_context.rules[1].content', 'user_message_action.request_context.tools[0].description']);
+  assert.deepStrictEqual(r.runs[0].findings.find((f) => f.kind === 'client-sent-tool-definitions').names, ['srv-search']);
+  assert.match(report.renderComparison(r), /context parts by id: rules != recorded [0-9a-f]{12}, mcps != recorded/);
+});

@@ -6,10 +6,14 @@
 #   cursor-wire status             is it running, where do captures go
 #   cursor-wire ca install|remove|status
 #                                  trust mitmproxy's CA for Cursor (Chromium's NSS store)
-#   cursor-wire launch [args...]   start Cursor through the proxy
-#   cursor-wire env                print the command `launch` runs
+#   cursor-wire launch [--port N] [--any-proxy] [args...]
+#                                  start Cursor through the proxy `start` recorded (or
+#                                  the one on port N); it must be a mitmdump running
+#                                  cursor-wire.py, unless --any-proxy
+#   cursor-wire env [--port N] [--any-proxy]
+#                                  print the command `launch` runs
 #
-# Captures, pidfile and log live in $CURSOR_WIRE_DIR (default ~/.cursor-wire).
+# Captures, pidfile, port and log live in $CURSOR_WIRE_DIR (default ~/.cursor-wire).
 set -euo pipefail
 
 WIRE_DIR=${CURSOR_WIRE_DIR:-$HOME/.cursor-wire}
@@ -31,29 +35,35 @@ mitmdump_bin() {
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
+is_port() { [[ $1 =~ ^[0-9]+$ ]] || die "not a port number: $1"; }
+
+cmdline() { tr '\0' ' ' 2>/dev/null <"/proc/$1/cmdline"; }
+
+# Whether pid $1 is a mitmdump running cursor-wire.py (from any checkout).
+is_wire_proxy() { cmdline "$1" | grep -q 'mitmdump.*cursor-wire\.py'; }
+
+# The pid in the pidfile, if it is still a cursor-wire proxy.
+recorded_pid() {
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null) && is_wire_proxy "$pid" && echo "$pid"
+}
+
 # The pid of the proxy this script started, if it is still that process.
 our_pid() {
-  [ -f "$PIDFILE" ] || return 1
-  local pid; pid=$(cat "$PIDFILE")
-  [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q "mitmdump.*$ADDON" && echo "$pid"
+  local pid; pid=$(recorded_pid) && cmdline "$pid" | grep -qF "$ADDON" && echo "$pid"
 }
 
-port() { cat "$PORTFILE" 2>/dev/null || echo 8080; }
-
-launch_cmd() {
-  printf 'NODE_EXTRA_CA_CERTS=%q %q --password-store=gnome-libsecret --proxy-server=http://127.0.0.1:%s\n' \
-    "$CA" "$CURSOR" "$(port)"
-}
+recorded_port() { cat "$PORTFILE" 2>/dev/null; }
 
 cmd_start() {
-  local p=8080
+  local p=8080 pid
   while [ $# -gt 0 ]; do
     case $1 in
       --port) p=${2:?--port needs a number}; shift 2 ;;
       *) die "unknown option: $1" ;;
     esac
   done
-  if pid=$(our_pid); then die "already running (pid $pid, port $(port))"; fi
+  is_port "$p"
+  if pid=$(recorded_pid); then die "already running (pid $pid, port $(recorded_port)) for $WIRE_DIR"; fi
   listening "$p" && die "port $p is already in use by another process; pick one with --port N"
   mkdir -p "$WIRE_DIR"
   setsid "$(mitmdump_bin)" --listen-host 127.0.0.1 -p "$p" -s "$ADDON" --set "wire_dir=$WIRE_DIR" \
@@ -65,29 +75,35 @@ cmd_start() {
     kill -0 $! 2>/dev/null || break
     sleep 0.2
   done
+  rm -f "$PIDFILE" "$PORTFILE"
   tail -n 20 "$LOG" >&2
   die "the proxy did not start; log: $LOG"
 }
 
 cmd_stop() {
   local pid
-  pid=$(our_pid) || { rm -f "$PIDFILE"; die "not running (no proxy started by this script)"; }
+  if ! pid=$(recorded_pid); then
+    rm -f "$PIDFILE" "$PORTFILE"  # stale: that process is gone
+    die "not running (no proxy started by this script)"
+  fi
+  our_pid >/dev/null || die "pid $pid was started from another checkout ($(cmdline "$pid")); stop it with that one's script"
   kill "$pid"
   for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-  rm -f "$PIDFILE"
+  rm -f "$PIDFILE" "$PORTFILE"
   echo "stopped (pid $pid)"
 }
 
 cmd_status() {
-  local pid
-  if pid=$(our_pid); then
-    echo "running: pid $pid on 127.0.0.1:$(port), recording into $WIRE_DIR"
+  local pid p
+  if pid=$(recorded_pid); then
+    echo "running: pid $pid on 127.0.0.1:$(recorded_port), recording into $WIRE_DIR"
   else
     echo "not running (no proxy started by this script)"
-    listening "$(port)" && echo "note: something else is listening on 127.0.0.1:$(port)"
+    p=$(recorded_port) || p=8080
+    listening "$p" && echo "note: something else is listening on 127.0.0.1:$p"
   fi
   echo "log: $LOG"
-  cmd_ca status
+  if command -v certutil >/dev/null; then cmd_ca status; else echo "CA: certutil not found"; fi
 }
 
 cmd_ca() {
@@ -121,10 +137,35 @@ cmd_ca() {
   esac
 }
 
+# The pid of the process listening on 127.0.0.1:$1, if this user owns it.
+listener_pid() { ss -Hltnp "src 127.0.0.1:$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2; }
+
+# launch and env: never fall back to a default port, so a test can't reach a real proxy by accident.
 cmd_launch() {
-  local p; p=$(port)
+  local print=$1 p any="" pid; shift
+  p=$(recorded_port) || p=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --port) p=${2:?--port needs a number}; shift 2 ;;
+      --any-proxy) any=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$p" ] || die "no proxy recorded in $PORTFILE; run: cursor-wire start (or pass --port N)"
+  is_port "$p"
   listening "$p" || die "no proxy listening on 127.0.0.1:$p; run: cursor-wire start"
+  if [ -z "$any" ]; then
+    pid=$(listener_pid "$p")
+    [ -n "$pid" ] && is_wire_proxy "$pid" \
+      || die "127.0.0.1:$p is not a mitmdump running cursor-wire.py; pass --any-proxy to use it anyway"
+  fi
   [ -f "$CA" ] || die "no mitmproxy CA at $CA; run: cursor-wire ca install"
+  if [ "$print" = print ]; then
+    printf 'NODE_EXTRA_CA_CERTS=%q %q --password-store=gnome-libsecret --proxy-server=http://127.0.0.1:%s\n' \
+      "$CA" "$CURSOR" "$p"
+    return
+  fi
   NODE_EXTRA_CA_CERTS=$CA exec "$CURSOR" --password-store=gnome-libsecret --proxy-server="http://127.0.0.1:$p" "$@"
 }
 
@@ -133,7 +174,7 @@ case ${1:-} in
   stop) cmd_stop ;;
   status) cmd_status ;;
   ca) shift; cmd_ca "$@" ;;
-  launch) shift; cmd_launch "$@" ;;
-  env) launch_cmd ;;
-  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; [ -n "${1:-}" ] && exit 1 || exit 0 ;;
+  launch) shift; cmd_launch run "$@" ;;
+  env) shift; cmd_launch print "$@" ;;
+  *) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//'; [ -n "${1:-}" ] && exit 1 || exit 0 ;;
 esac

@@ -229,3 +229,61 @@ test('cursor-wire finalizes a stream the server ends first, and keeps what the c
   assert.deepStrictEqual(gunzip(path.join(flowDir, 'request.bin.gz')), Buffer.from('first and late'));
   assert.strictEqual(meta().request_bytes, 'first and late'.length);
 });
+
+// The script runs with its own HOME and CURSOR_WIRE_DIR, and CURSOR_BIN=/bin/echo, so it
+// never touches a real proxy, CA store or Cursor.
+const SCRIPT = path.join(__dirname, '..', 'tools', 'cursor-wire');
+const ss = which('ss');
+
+test('cursor-wire launch only uses the proxy start recorded, or an explicit one it verified', {
+  skip: skip || (!ss && 'ss not installed'), timeout: 60000,
+}, async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-wire-test-'));
+  const env = {
+    ...process.env, HOME: home, CURSOR_WIRE_DIR: path.join(home, 'wire'), CURSOR_BIN: '/bin/echo',
+    PATH: `${path.dirname(mitmdump)}${path.delimiter}${process.env.PATH}`,
+  };
+  const run = (...args) => {
+    try {
+      return { ok: true, out: execFileSync(SCRIPT, args, { env, encoding: 'utf8', stdio: 'pipe' }) };
+    } catch (e) {
+      return { ok: false, out: `${e.stdout}${e.stderr}` };
+    }
+  };
+  const other = net.createServer().listen(0, '127.0.0.1'); // a listener that is not our proxy
+  await new Promise((r) => other.on('listening', r));
+  t.after(() => {
+    run('stop');
+    other.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  let r = run('launch');
+  assert.ok(!r.ok && /no proxy recorded/.test(r.out), r.out);
+
+  const port = await freePort();
+  r = run('start', '--port', String(port));
+  assert.ok(r.ok, r.out);
+  r = run('start', '--port', String(await freePort()));
+  assert.ok(!r.ok && /already running/.test(r.out), r.out);
+
+  r = run('launch', '--new-window');
+  assert.ok(r.ok, r.out);
+  assert.match(r.out, new RegExp(`--proxy-server=http://127\\.0\\.0\\.1:${port} --new-window`));
+  assert.match(run('env').out, new RegExp(`--proxy-server=http://127\\.0\\.0\\.1:${port}`));
+
+  const otherPort = String(other.address().port);
+  r = run('launch', '--port', otherPort);
+  assert.ok(!r.ok && /not a mitmdump running cursor-wire\.py/.test(r.out), r.out);
+  r = run('launch', '--port', otherPort, '--any-proxy');
+  assert.ok(r.ok && r.out.includes(`127.0.0.1:${otherPort}`), r.out);
+  r = run('launch', '--port', String(await freePort()));
+  assert.ok(!r.ok && /no proxy listening/.test(r.out), r.out);
+
+  assert.match(run('status').out, new RegExp(`running: pid \\d+ on 127\\.0\\.0\\.1:${port}`));
+  r = run('stop');
+  assert.ok(r.ok && /stopped/.test(r.out), r.out);
+  assert.strictEqual(await listening(port), false);
+  r = run('launch');
+  assert.ok(!r.ok && /no proxy recorded/.test(r.out), r.out);
+});

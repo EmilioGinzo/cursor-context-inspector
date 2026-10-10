@@ -232,8 +232,10 @@ tools/cursor-wire status
 tools/cursor-wire stop         # stops only the proxy this script started
 ```
 
-`tools/cursor-wire env` prints the launch command, if you prefer to start Cursor
-yourself.
+`launch` only uses the proxy `start` recorded, or `--port N` if you started
+mitmdump yourself; either way it checks that the listener is a mitmdump running
+`cursor-wire.py` (`--any-proxy` skips that). `tools/cursor-wire env` prints the
+launch command, if you prefer to start Cursor yourself.
 
 Captures go to `~/.cursor-wire/<day>/`, one folder per request, with
 `meta.json` (method, URL, headers, status, trailers such as `grpc-status`,

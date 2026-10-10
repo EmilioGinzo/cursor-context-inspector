@@ -299,6 +299,14 @@ function decodeBlobs(run, schema) {
     const blob = run.blobs.get(r.id);
     if (!blob || blob.decoded !== undefined) continue;
     blob.decoded = decodeBlob(blob.data, r.ref, schema);
+    // A user message blob refers to its text and to the conversation state when it was sent.
+    if (/(^|\.)turn_user_message$/.test(r.ref) && blob.decoded.message) {
+      for (const ref of actionRefs(undefined, blob.decoded.message)) {
+        const x = { ...ref, from: `user message ${r.id}` };
+        queue.push(x);
+        run.refs.push(x);
+      }
+    }
     if (/(^|\.)turn$/.test(r.ref) && blob.decoded.message) {
       const t = blob.decoded.message.agent_conversation_turn;
       const s = blob.decoded.message.shell_conversation_turn;
@@ -332,6 +340,7 @@ const BLOB_TYPES = {
   turn: 'agent.v1.ConversationTurnStructure',
   turn_user_message: 'agent.v1.UserMessage',
   turn_step: 'agent.v1.ConversationStep',
+  user_message_conversation_state: 'agent.v1.ConversationStateStructure',
 };
 
 function decodeBlob(data, ref, schema) {

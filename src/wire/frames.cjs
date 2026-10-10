@@ -55,6 +55,7 @@ function inflateFrame(frame, raw, encoding) {
   }
   frame.encoding = encoding || 'identity';
   try {
+    if (frame.encoding.toLowerCase() === 'identity') throw new Error('compressed flag set, but no encoding was negotiated');
     frame.payload = decompress(raw, encoding);
   } catch (e) {
     frame.payload = raw;

@@ -229,6 +229,8 @@ test('gRPC framing with per-frame gzip, deflate and br compression', () => {
   const broken = frames.splitBody(pb.envelope(1, Buffer.from('not gzip')), H('application/grpc', { 'grpc-encoding': 'gzip' }));
   assert.ok(broken.frames[0].decompressError);
   assert.strictEqual(broken.frames[0].payload.toString(), 'not gzip');
+  const unnegotiated = frames.splitBody(pb.envelope(1, zlib.gzipSync(a)), H('application/grpc'));
+  assert.match(unnegotiated.frames[0].decompressError, /no encoding/);
 });
 
 test('Connect streaming: compressed frames and the end-stream trailer', () => {

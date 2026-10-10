@@ -150,15 +150,17 @@ holds its final state even when Cursor stores it without a newer timestamp:
 
 | Path | Contents |
 | --- | --- |
-| `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages. |
+| `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages; the context sent beside the prompt is linked under each of your messages, collapsed. |
 | `chats/<chat name>/thinking.json` | The agent's readable thinking, in order, each with the prompt message (and its reasoning part) it belongs to and how long it took. See [Thinking](#thinking). |
 | `chats/<chat name>/transcript.md` | Every prompt message ever seen in the chat, raw, in order. Messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned. |
 | `chats/<chat name>/snapshots/<time>.json` | Token breakdown and the prompt's message hashes at each change. `<time>` is when the chat last changed: the send, or the agent's last stored state. A snapshot is never overwritten: a second state under a taken name gets `-at<recorded time>`. |
 | `chats/<chat name>/snapshots/<lastUpdatedAt>-<n>.json` | The first `n` of those hashes: a state the chat went through before that update. Cursor keeps only the newest state, but each assistant message was written by a model call that saw exactly the messages before it (`"state": "prompt"`), and a turn ended before each user message that follows the agent (`"turn end"`). Derived, not observed: only while the chat just grew, so not across a summary or an edit of an earlier message, which rewrite the prompt; the states of such a run are then not recorded. |
 | `chats/<chat name>/latest.json` | Newest snapshot plus Cursor's usage tree. |
-| `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order. |
+| `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order, and `sentContext`: for each of your messages, the context parts sent with it (see below). |
 | `chats/<chat name>/subagents/<subagent name>/` | The same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent. |
 | `blobs/<sha256>.json` | Each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading). |
+| `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. |
+| `context/<sha256>.md` | The same part, readable: one collapsed section per rule, skill, subagent or tool. |
 | `index.json` | All recorded chats, newest first, each with its subagent tree. |
 
 - **Folder names** follow the chat name, with characters that are not valid
@@ -211,6 +213,36 @@ Without a tree, items come from the prompt's XML-style sections (`<rules>`,
 
 Category totals always come from Cursor's own numbers. Item estimates are
 Cursor's when it has a tree, otherwise roughly characters / 4.
+
+### Context sent beside the prompt
+
+With your messages Cursor also sends context that is not in the prompt
+messages: every rule with its content (including rules the prompt only lists),
+every agent skill, your custom subagents with their prompts, the MCP tools'
+definitions and instructions, and small items such as workspace folders and git
+remote URLs. On a chat's first message it travels whole; with every message it
+travels as four parts (rules, skills, subagents, MCP) named by their sha256,
+and the server reuses the parts it already has. Cursor stores none of it.
+
+So the recorder rebuilds the four parts from their sources when it sees a new
+message of yours, the way Cursor's client builds them: `.cursor/rules`,
+`AGENTS.md` / `CLAUDE.md` and `.cursorrules` of each workspace folder and its
+parent folders (and nested ones in git repositories), the skill folders
+(`.cursor/skills`, `.claude/skills`, `.codex/skills`, `.agents/skills`,
+`~/.cursor/skills-cursor`, installed plugins), `.cursor/agents`, and the MCP
+tool snapshots Cursor writes under `~/.cursor/projects/<workspace>/mcps`. It
+uses Cursor's own ripgrep and frontmatter parser, so the bytes come out the
+same when the files have not changed; the panel shows them as **Sent with the
+request, not in the prompt**. Only messages the recorder sees within 10 minutes
+are matched with a rebuild (older chats get none: the files may have changed).
+
+A rebuilt part is what Cursor sent only when their sha256 match.
+`cursor-context wire compare` checks that against captured traffic, part by
+part; `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
+under the same id. Things the rebuild cannot know: the order MCP servers
+connected in (Cursor's own servers are put first), team rules, Agent Store
+skills, and plugin database ids, which are taken from a part Cursor kept in its
+database when there is one (`context/plugin-ids.json`).
 
 ## CLI
 
@@ -290,9 +322,11 @@ the client, and sends checkpoints of the new state. `cursor-context wire conv`
 rebuilds each conversation from those flows (every client and server message,
 blobs from both sides, streamed text and thinking joined exactly);
 `cursor-context wire compare [<chat name or id prefix>]` checks it against what
-the plugin recorded, run by run, and rates the plugin's assumptions. Both clip
-long texts in their human view (`--clip N`, `--full` shows all); `--json` keeps
-every byte. `compare` reads `~/.cursor-context-history` (`--history`) and
+the plugin recorded, run by run, and rates the plugin's assumptions; context
+parts sent by id are compared with the recorded ones by sha256, and item by
+item where they differ (`--record-now` rebuilds them from the files as they
+are now). Both clip long texts in their human view (`--clip N`, `--full` shows
+all); `--json` keeps every byte. `compare` reads `~/.cursor-context-history` (`--history`) and
 Cursor's DB read-only (`--db`, or `--no-db`).
 
 Decoding needs Cursor's protobuf schema, which `bin/cursor-wire-schema.cjs`
@@ -307,8 +341,13 @@ if you no longer want the CA or the captures).
 
 ## Limitations
 
-- **Tool definitions are not stored locally.** Cursor's backend attaches
-  them, so only each tool's name and token estimate are shown.
+- **Built-in tool definitions are not stored locally.** Cursor's backend
+  attaches them, so only each tool's name and token estimate are shown. MCP
+  tool definitions are sent by the client and recorded (see
+  [Context sent beside the prompt](#context-sent-beside-the-prompt)).
+- **The context sent beside the prompt is rebuilt, not captured.** It matches
+  what Cursor sent when the rule, skill, agent and MCP files did not change in
+  between; `wire compare` tells.
 - The extension reads undocumented Cursor storage. A Cursor update can change
   it; open an issue if a category comes up empty.
 - The history folder contains everything your chats contain, including any
@@ -322,6 +361,9 @@ src/cursorStore.cjs   reads state.vscdb and builds the context breakdown
 src/history.cjs       session history recorder and backfill
 src/chatMarkdown.cjs  renders chat.md
 src/turnSteps.cjs     reads Cursor's turn steps and places their thinking on prompt messages
+src/requestContext.cjs  the context parts' wire format (encode, decode)
+src/contextSources.cjs  rebuilds them from rule, skill, agent and MCP files
+src/sentContext.cjs   records them in the history, renders them
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
 src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles

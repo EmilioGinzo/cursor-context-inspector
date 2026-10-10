@@ -2,6 +2,9 @@
 
 // cursor-context wire ls   [--day YYYY-MM-DD] [--grep text] [--root dir] [--json]
 // cursor-context wire show <flow> [--raw] [--json] [--clip N] [--schema file.json | --app dir] [--root dir]
+// cursor-context wire conv    [<conversation id prefix>] [--day D] [--json] [--clip N | --full]
+// cursor-context wire compare [<chat name | composerId prefix>] [--day D] [--json] [--clip N | --full]
+//                             [--history dir] [--db state.vscdb | --no-db]
 // <flow> is a flow directory, or its name (e.g. 101500-00002-aiserver.v1.AiService_ServerTime, or a
 // unique part of it). An index into the `wire ls` listing (with the same --day/--grep) also works,
 // but shifts while the proxy is recording.
@@ -10,11 +13,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const flows = require('./flows.cjs');
 const { renderFlow } = require('./render.cjs');
+const conversation = require('./conversation.cjs');
+const compareLib = require('./compare.cjs');
+const report = require('./report.cjs');
 
 const USAGE = `usage:
   cursor-context wire ls [--day YYYY-MM-DD] [--grep text] [--json]
   cursor-context wire show <flow dir or name> [--raw] [--json] [--clip N] [--schema file.json | --app dir]
       <flow> may also be a \`wire ls\` index (same --day/--grep), but indexes shift while recording
+  cursor-context wire conv [<conversation id prefix>] [--day D] [--json] [--clip N | --full]
+      agent conversations rebuilt from the Run/RunSSE/BidiAppend flows: every client and server message
+  cursor-context wire compare [<chat name | composerId prefix>] [--day D] [--json] [--clip N | --full]
+                              [--history dir] [--db state.vscdb | --no-db]
+      the rebuilt conversations against what the plugin recorded (default ~/.cursor-context-history
+      and Cursor's state.vscdb, read-only)
   captures are read from --root, $CURSOR_WIRE_DIR or ~/.cursor-wire;
   the schema is extracted from Cursor at --app (cached), or read from --schema (cursor-wire-schema --out)`;
 
@@ -34,7 +46,7 @@ function loadSchema({ file, appDir } = {}) {
 
 function parseArgs(argv) {
   const opts = { _: [] };
-  const valued = new Set(['--day', '--grep', '--clip', '--root', '--schema', '--app']);
+  const valued = new Set(['--day', '--grep', '--clip', '--root', '--schema', '--app', '--history', '--db']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (valued.has(a)) opts[a.slice(2)] = argv[++i];
@@ -95,8 +107,57 @@ async function run(argv, out = process.stdout) {
     print(`${note}\n${renderFlow(flow, { clip })}`);
     return 0;
   }
+  if (cmd === 'conv' || cmd === 'compare') {
+    const { schema, note } = loadSchema({ file: opts.schema, appDir: opts.app });
+    if (!schema) throw new Error(`agent conversations need the schema: ${note}`);
+    const rebuilt = conversation.reconstruct({ root: opts.root, day: opts.day, schema });
+    const clip = opts.full ? 0 : opts.clip ? Number(opts.clip) : 400;
+    if (cmd === 'conv') {
+      const list = rebuilt.conversations.filter((c) => !ref || c.conversationId.startsWith(ref));
+      if (opts.json) {
+        print(JSON.stringify({ schema: note, conversations: list, unassigned: rebuilt.unassigned, flowErrors: rebuilt.flowErrors }, jsonReplacer, 2));
+        return 0;
+      }
+      print(note);
+      for (const c of list) print(`\n${report.renderConversation(c, { clip })}`);
+      if (rebuilt.unassigned.length) print(`\n${rebuilt.unassigned.length} runs without a conversation id: ${rebuilt.unassigned.map((r) => r.flow.id).join(', ')}`);
+      for (const e of rebuilt.flowErrors) print(`flow ${e.flow.id}: ${e.error}`);
+      if (!list.length) print('no agent conversations in the captures');
+      return 0;
+    }
+    const historyDir = opts.history || require('../history.cjs').defaultHistoryDir();
+    const db = opts['no-db'] ? null : openDb(opts.db);
+    try {
+      const results = compareLib.compare({ conversations: rebuilt.conversations, historyDir, db, ref });
+      if (opts.json) {
+        print(JSON.stringify({ schema: note, historyDir, db: !!db, comparisons: results, unassigned: rebuilt.unassigned.map((r) => r.flow), flowErrors: rebuilt.flowErrors }, jsonReplacer, 2));
+        return 0;
+      }
+      print(`${note}\nrecord: ${historyDir}${db ? ' + Cursor DB' : ''}`);
+      for (const r of results) print(`\n${report.renderComparison(r, { clip })}`);
+      if (!results.length) print(ref ? `no captured agent conversation for "${ref}"` : 'no agent conversations in the captures');
+      return 0;
+    } finally {
+      if (db) db.close();
+    }
+  }
   process.stderr.write(`${USAGE}\n`);
   return 2;
+}
+
+// Cursor's DB, read-only, if it exists; compare works without it (fewer checks).
+function openDb(file) {
+  const store = require('../cursorStore.cjs');
+  const p = file || store.defaultDatabasePath();
+  if (!fs.existsSync(p)) return null;
+  return store.openDatabase(p);
+}
+
+// Buffers (blob bytes) as base64, Maps as objects: --json keeps every byte.
+function jsonReplacer(key, value) {
+  if (value && value.type === 'Buffer' && Array.isArray(value.data)) return { base64: Buffer.from(value.data).toString('base64') };
+  if (value instanceof Map) return Object.fromEntries(value);
+  return value;
 }
 
 module.exports = { run, loadSchema, parseArgs };

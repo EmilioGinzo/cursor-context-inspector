@@ -257,8 +257,20 @@ as they pass), plus one line per request in `flows.jsonl`. Nothing is capped or
 dropped. Authorization, cookie and API key headers, and secret-looking query
 parameters, are redacted in `meta.json`, but the bodies are kept whole: they
 hold your prompts, code and login tokens, so treat the folder like the chats
-themselves. `cursor-context wire ls|show` decodes them
-(added on a separate branch).
+themselves. `cursor-context wire ls|show` decodes them.
+
+Agent chats travel as `agent.v1.AgentService/Run` streams. The client does not
+send the conversation as text: it sends the chat's state as sha256 blob ids
+(the same ids as Cursor's `agentKv:blob:<id>` and the history's `blobs/`), and
+the server fetches the blobs it lacks over the same stream, stores new ones on
+the client, and sends checkpoints of the new state. `cursor-context wire conv`
+rebuilds each conversation from those flows (every client and server message,
+blobs from both sides, streamed text and thinking joined exactly);
+`cursor-context wire compare [<chat name or id prefix>]` checks it against what
+the plugin recorded, run by run, and rates the plugin's assumptions. Both clip
+long texts in their human view (`--clip N`, `--full` shows all); `--json` keeps
+every byte. `compare` reads `~/.cursor-context-history` (`--history`) and
+Cursor's DB read-only (`--db`, or `--no-db`).
 
 Decoding needs Cursor's protobuf schema, which `bin/cursor-wire-schema.cjs`
 extracts from the installed bundles (`--app <dir>` if Cursor is not in
@@ -289,6 +301,8 @@ src/chatMarkdown.cjs  renders chat.md
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
 src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles
+src/wire/conversation.cjs  agent conversations rebuilt from captured flows
+src/wire/compare.cjs  compares them with the recorded history
 tools/cursor-wire     wire-traffic recorder (mitmproxy add-on cursor-wire.py)
 test/                 node:test suites (npm test)
 ```

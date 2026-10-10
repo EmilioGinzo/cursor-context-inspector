@@ -176,18 +176,20 @@ test('RunSSE: client messages come from BidiAppend flows, in append_seqno order,
     url: 'https://x/agent.v1.AgentService/RunSSE', started: 10,
     reqBody: pb.envelope(0, enc('aiserver.v1.BidiRequestId', { request_id: reqId })), respBody: stream(serverMsgs),
   });
-  // Appended out of order (seqno 2 captured first), alternating encodings.
+  // Appended out of order (seqno 2 captured first), alternating encodings. Like Cursor, seqno 0 is
+  // left out (the proto3 default).
   clientMsgs.map((m, i) => ({ m, i })).reverse().forEach(({ m, i }, k) => {
+    const seqno = i ? { append_seqno: i } : {};
     const body = i % 2
-      ? enc('aiserver.v1.BidiAppendRequest', { request_id: { request_id: reqId }, append_seqno: i, data_binary: m })
-      : enc('aiserver.v1.BidiAppendRequest', { request_id: { request_id: reqId }, append_seqno: i, data: m.toString('hex') });
+      ? enc('aiserver.v1.BidiAppendRequest', { request_id: { request_id: reqId }, ...seqno, data_binary: m })
+      : enc('aiserver.v1.BidiAppendRequest', { request_id: { request_id: reqId }, ...seqno, data: m.toString('hex') });
     writeFlow(wire, `10000${k}-0000${k + 2}-aiserver.v1.BidiService_BidiAppend`, { url: 'https://x/aiserver.v1.BidiService/BidiAppend', reqCt: 'application/proto', respCt: 'application/proto', started: 11 + k, reqBody: body, respBody: Buffer.alloc(0) });
   });
   const { conversations } = conversation.reconstruct({ root: wire, schema });
   const [run] = conversations[0].runs;
   assert.strictEqual(run.transport, 'sse');
   assert.strictEqual(run.requestId, reqId);
-  assert.deepStrictEqual(run.client.map((e) => e.kind), ['run_request', 'kv_get_blob_result', 'exec_result']);
+  assert.deepStrictEqual(run.client.map((e) => `${e.where} ${e.kind}`), ['a0 run_request', 'a1 kv_get_blob_result', 'a2 exec_result']);
   assert.strictEqual(run.client[1].blobId, M.sys.hex);
   assert.strictEqual(conversations[0].conversationId, CID);
 });

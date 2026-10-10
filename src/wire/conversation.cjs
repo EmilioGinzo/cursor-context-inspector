@@ -18,6 +18,9 @@
 // and sends each client message with aiserver.v1.BidiService/BidiAppend (hex `data` or
 // `data_binary`, ordered by append_seqno), keyed by the same BidiRequestId.
 //
+// proto3 leaves zero values out: the first append (append_seqno 0) and kv / exec id 0 decode as
+// absent, and are read as 0 here.
+//
 // Captures carry no per-frame timestamps: the client and server streams of a run are kept as two
 // ordered lists, tied together by kv / exec ids.
 
@@ -156,7 +159,7 @@ function clientEvent(run, msg, where) {
     }
     case 'kv_client_message': {
       const [k, v] = only(value, ['id']);
-      Object.assign(ev, { kind: `kv_${k}`, id: value.id, error: v && v.error && v.error.message });
+      Object.assign(ev, { kind: `kv_${k}`, id: value.id ?? 0, error: v && v.error && v.error.message });
       if (k === 'get_blob_result') {
         ev.hasData = v.blob_data !== undefined;
         ev.size = Buffer.from(v.blob_data || '', 'base64').length;
@@ -166,7 +169,7 @@ function clientEvent(run, msg, where) {
     }
     case 'exec_client_message': {
       const [op, result] = only(value, ['id', 'exec_id', 'local_execution_time_ms', 'hook_additional_contexts']);
-      Object.assign(ev, { kind: 'exec_result', id: value.id, execId: value.exec_id, op, result, hookContexts: value.hook_additional_contexts });
+      Object.assign(ev, { kind: 'exec_result', id: value.id ?? 0, execId: value.exec_id, op, result, hookContexts: value.hook_additional_contexts });
       break;
     }
     case 'conversation_action': {
@@ -237,7 +240,7 @@ function serverEvent(run, msg, where) {
   }
   if (kind === 'kv_server_message') {
     const [k, v] = only(value, ['id', 'span_context']);
-    const ev = { where, kind: `kv_${k}`, id: value.id };
+    const ev = { where, kind: `kv_${k}`, id: value.id ?? 0 };
     if (k === 'get_blob_args' || k === 'set_blob_args') ev.blobId = hex(v.blob_id);
     if (k === 'set_blob_args') {
       ev.size = Buffer.from(v.blob_data || '', 'base64').length;
@@ -247,7 +250,7 @@ function serverEvent(run, msg, where) {
   }
   if (kind === 'exec_server_message') {
     const [op, args] = only(value, ['id', 'exec_id', 'machine_id', 'span_context', 'accept_hook_additional_contexts']);
-    return run.server.push({ where, kind: 'exec', id: value.id, execId: value.exec_id, op, args });
+    return run.server.push({ where, kind: 'exec', id: value.id ?? 0, execId: value.exec_id, op, args });
   }
   if (kind === 'conversation_checkpoint_update') {
     const n = run.checkpoints.length;
@@ -436,7 +439,7 @@ function reconstruct({ root, day, schema, decode = flowsLib.decodeFlow } = {}) {
       const reqId = m.request_id && m.request_id.request_id;
       const bytes = m.data_binary ? Buffer.from(m.data_binary, 'base64') : textBytes(m.data);
       const list = appends.get(reqId) || [];
-      list.push({ flow: f, seqno: m.append_seqno, started: f.started, message: decodeBytesAs(schema, 'agent.v1.AgentClientMessage', bytes) });
+      list.push({ flow: f, seqno: m.append_seqno ?? '0', started: f.started, message: decodeBytesAs(schema, 'agent.v1.AgentClientMessage', bytes) });
       appends.set(reqId, list);
       continue;
     }

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Record Cursor's network traffic through a local mitmproxy (see cursor-wire.py).
+#
+#   cursor-wire start [--port N]   start the recording proxy in the background
+#   cursor-wire stop               stop the proxy this script started
+#   cursor-wire status             is it running, where do captures go
+#   cursor-wire ca install|remove|status
+#                                  trust mitmproxy's CA for Cursor (Chromium's NSS store)
+#   cursor-wire launch [args...]   start Cursor through the proxy
+#   cursor-wire env                print the command `launch` runs
+#
+# Captures, pidfile and log live in $CURSOR_WIRE_DIR (default ~/.cursor-wire).
+set -euo pipefail
+
+WIRE_DIR=${CURSOR_WIRE_DIR:-$HOME/.cursor-wire}
+PIDFILE=$WIRE_DIR/proxy.pid
+PORTFILE=$WIRE_DIR/proxy.port
+LOG=$WIRE_DIR/proxy.log
+ADDON=$(dirname "$(readlink -f "$0")")/cursor-wire.py
+CA=$HOME/.mitmproxy/mitmproxy-ca-cert.pem
+NSSDB=sql:$HOME/.pki/nssdb
+NICK="mitmproxy-local (context-inspector testing)"
+CURSOR=${CURSOR_BIN:-/usr/share/cursor/cursor}
+
+die() { echo "cursor-wire: $*" >&2; exit 1; }
+
+mitmdump_bin() {
+  command -v mitmdump 2>/dev/null || { [ -x "$HOME/.local/bin/mitmdump" ] && echo "$HOME/.local/bin/mitmdump"; } \
+    || die "mitmdump not found; install it with: uv tool install mitmproxy"
+}
+
+listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# The pid of the proxy this script started, if it is still that process.
+our_pid() {
+  [ -f "$PIDFILE" ] || return 1
+  local pid; pid=$(cat "$PIDFILE")
+  [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q "mitmdump.*$ADDON" && echo "$pid"
+}
+
+port() { cat "$PORTFILE" 2>/dev/null || echo 8080; }
+
+launch_cmd() {
+  printf 'NODE_EXTRA_CA_CERTS=%q %q --password-store=gnome-libsecret --proxy-server=http://127.0.0.1:%s\n' \
+    "$CA" "$CURSOR" "$(port)"
+}
+
+cmd_start() {
+  local p=8080
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --port) p=${2:?--port needs a number}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  if pid=$(our_pid); then die "already running (pid $pid, port $(port))"; fi
+  listening "$p" && die "port $p is already in use by another process; pick one with --port N"
+  mkdir -p "$WIRE_DIR"
+  setsid "$(mitmdump_bin)" --listen-host 127.0.0.1 -p "$p" -s "$ADDON" --set "wire_dir=$WIRE_DIR" \
+    --set flow_detail=0 --set termlog_verbosity=warn </dev/null >>"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+  echo "$p" >"$PORTFILE"
+  for _ in $(seq 50); do
+    listening "$p" && { echo "recording on 127.0.0.1:$p into $WIRE_DIR (pid $!)"; return; }
+    kill -0 $! 2>/dev/null || break
+    sleep 0.2
+  done
+  tail -n 20 "$LOG" >&2
+  die "the proxy did not start; log: $LOG"
+}
+
+cmd_stop() {
+  local pid
+  pid=$(our_pid) || { rm -f "$PIDFILE"; die "not running (no proxy started by this script)"; }
+  kill "$pid"
+  for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  rm -f "$PIDFILE"
+  echo "stopped (pid $pid)"
+}
+
+cmd_status() {
+  local pid
+  if pid=$(our_pid); then
+    echo "running: pid $pid on 127.0.0.1:$(port), recording into $WIRE_DIR"
+  else
+    echo "not running (no proxy started by this script)"
+    listening "$(port)" && echo "note: something else is listening on 127.0.0.1:$(port)"
+  fi
+  echo "log: $LOG"
+  cmd_ca status
+}
+
+cmd_ca() {
+  command -v certutil >/dev/null || die "certutil not found (package nss / libnss3-tools)"
+  case ${1:-status} in
+    install)
+      if [ ! -f "$CA" ]; then
+        # mitmproxy creates its CA the first time it runs.
+        "$(mitmdump_bin)" --listen-host 127.0.0.1 -p 0 >/dev/null 2>&1 &
+        local pid=$!
+        for _ in $(seq 100); do [ -f "$CA" ] && break; sleep 0.1; done
+        kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+        [ -f "$CA" ] || die "mitmdump did not create $CA"
+      fi
+      mkdir -p "$HOME/.pki/nssdb"
+      [ -f "$HOME/.pki/nssdb/cert9.db" ] || certutil -d "$NSSDB" -N --empty-password
+      certutil -d "$NSSDB" -A -t "C,," -n "$NICK" -i "$CA"
+      echo "trusted $CA as \"$NICK\""
+      ;;
+    remove)
+      certutil -d "$NSSDB" -D -n "$NICK" && echo "removed \"$NICK\""
+      ;;
+    status)
+      if certutil -d "$NSSDB" -L -n "$NICK" >/dev/null 2>&1; then
+        echo "CA trusted: \"$NICK\" ($CA)"
+      else
+        echo "CA not trusted; run: cursor-wire ca install"
+      fi
+      ;;
+    *) die "usage: cursor-wire ca install|remove|status" ;;
+  esac
+}
+
+cmd_launch() {
+  local p; p=$(port)
+  listening "$p" || die "no proxy listening on 127.0.0.1:$p; run: cursor-wire start"
+  [ -f "$CA" ] || die "no mitmproxy CA at $CA; run: cursor-wire ca install"
+  NODE_EXTRA_CA_CERTS=$CA exec "$CURSOR" --password-store=gnome-libsecret --proxy-server="http://127.0.0.1:$p" "$@"
+}
+
+case ${1:-} in
+  start) shift; cmd_start "$@" ;;
+  stop) cmd_stop ;;
+  status) cmd_status ;;
+  ca) shift; cmd_ca "$@" ;;
+  launch) shift; cmd_launch "$@" ;;
+  env) launch_cmd ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; [ -n "${1:-}" ] && exit 1 || exit 0 ;;
+esac

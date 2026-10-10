@@ -134,13 +134,21 @@ function leaves(v, at = '', out = []) {
 const NOT_CONTENT = /(_blob_id|(^|\.)message_id|_id)$/;
 
 // How `text` appears in `haystack` when not verbatim: 'whitespace' (equal once runs of whitespace are
-// collapsed), 'prefix' (its first 40 chars are there: shortened), 'lines' (90% of its lines end a
-// recorded line: e.g. numbered), or 'none'.
+// collapsed), 'prefix' (a leading part of 40+ chars is there, cut with an ellipsis: shortened), 'lines'
+// (90% of its lines end a recorded line: e.g. numbered), or 'none'. A shared start alone (a common
+// directory, a stock opening phrase) is not a shortened copy.
 const collapse = (t) => t.replace(/\s+/g, ' ').trim();
 function looseMatch(text, haystack, cache) {
   if (!cache.collapsed) cache.collapsed = collapse(haystack);
   if (cache.collapsed.includes(collapse(text))) return 'whitespace';
-  if (text.length > 40 && haystack.includes(text.slice(0, 40))) return 'prefix';
+  if (text.length > 40) {
+    const head = text.slice(0, 40);
+    for (let i = haystack.indexOf(head); i !== -1; i = haystack.indexOf(head, i + 1)) {
+      let n = head.length;
+      while (n < text.length && haystack[i + n] === text[n]) n++;
+      if (/^(\.\.\.|…)/.test(haystack.slice(i + n, i + n + 3))) return 'prefix';
+    }
+  }
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   if (lines.length > 1) {
     if (!cache.lines) cache.lines = haystack.split('\n').map((l) => l.trim());

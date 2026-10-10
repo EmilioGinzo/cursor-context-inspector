@@ -309,6 +309,8 @@ test('compare: context the server asks for by exec is checked against the whole 
   clientMsgs.push(client({ exec_client_message: { id: 3, request_context_result: { success: { request_context: {
     env: { workspace_paths: ['/home/someone/projects/example-repo'] },
     tools: [{ name: 'wiki_search', description: toolDescription }],
+    // Starts like the recorded rule, then goes on differently: not a shortened copy of it.
+    rules: [{ full_path: RULE_PATH, content: `${RULE.slice(0, 50)} Then a clause the record never had.` }],
   } } } } }));
   writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
   writeRecord(history);
@@ -317,6 +319,7 @@ test('compare: context the server asks for by exec is checked against the whole 
   assert.deepStrictEqual(f.filter((x) => x.kind === 'sent-context-not-in-record').map((x) => [x.path, x.text]), [
     ['exec #3 request_context_result.success.request_context.env.workspace_paths[0]', '/home/someone/projects/example-repo'],
     ['exec #3 request_context_result.success.request_context.tools[0].description', toolDescription],
+    ['exec #3 request_context_result.success.request_context.rules[0].content', `${RULE.slice(0, 50)} Then a clause the record never had.`],
   ]);
   // Not mistaken for a tool's output.
   assert.ok(!f.some((x) => x.kind === 'tool-output-not-in-recorded-result'));
@@ -339,7 +342,7 @@ test('compare: thinking kept only as turn steps, and context reformatted in the 
     server({ conversation_checkpoint_update: { root_prompt_messages_json: ids('sys', 'u0', 'a0', 'u1', 'a1', 't1', 'a2'), turns: [sha(turn)] } }));
   writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
   // Recorded: reasoning only encrypted; the rule shortened; the shell output numbered.
-  const short = RULE.slice(0, 45);
+  const short = `${RULE.slice(0, 45)}…`;
   writeRecord(history, { edit: {
     u1: Buffer.from(M.u1.data.toString().replace(RULE, short)),
     a1: Buffer.from(JSON.stringify({ ...M.a1.message, content: [{ type: 'redacted-reasoning', data: 'opaque' }, M.a1.message.content[1]] })),

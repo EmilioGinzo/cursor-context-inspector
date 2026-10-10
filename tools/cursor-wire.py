@@ -44,14 +44,20 @@ class Body:
     """A gzip file that the flow's body is teed into, chunk by chunk."""
 
     def __init__(self, path):
+        self.path = path
         self.file = gzip.open(path, "wb")
         self.bytes = 0
 
     def write(self, data):
-        if data and not self.file.closed:
+        if not data:
+            return
+        if self.file.closed:  # the client kept sending after the response ended: append a gzip member
+            with gzip.open(self.path, "ab") as f:
+                f.write(data)
+        else:
             self.file.write(data)
             self.file.flush()
-            self.bytes += len(data)
+        self.bytes += len(data)
 
     def close(self):
         if not self.file.closed:
@@ -175,7 +181,9 @@ class CursorWire:
     def _maybe_finalize(self, flow):
         if flow.websocket and not flow.websocket.timestamp_end:
             return  # the upgraded connection keeps going; websocket_end finalizes it
-        if flow.metadata.get("wire_request_done") and flow.metadata.get("wire_response_done"):
+        # A finished response ends the flow even if the request is still open: when the client then
+        # resets its half of an HTTP/2 stream, mitmproxy calls no hook at all.
+        if flow.metadata.get("wire_response_done"):
             self._finalize(flow)
 
     # -- HTTP -------------------------------------------------------------------------
@@ -187,8 +195,8 @@ class CursorWire:
 
     def request(self, flow: http.HTTPFlow):
         self._close(flow, "request", flow.request)
-        flow.metadata["wire_request_done"] = True
-        self._maybe_finalize(flow)
+        if flow.metadata.get("wire_final"):
+            self._meta(flow)  # the request outlived the response: record its final size and end
 
     def responseheaders(self, flow: http.HTTPFlow):
         flow.response.stream = self._tee(flow, "response")

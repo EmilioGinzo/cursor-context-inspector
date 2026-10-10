@@ -185,3 +185,47 @@ test('cursor-wire closes and indexes a stream the client abandons', { skip, time
   assert.strictEqual(meta.complete, true);
   assert.ok(meta.error);
 });
+
+test('cursor-wire finalizes a stream the server ends first, and keeps what the client sends after', { skip, timeout: 60000 }, async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-wire-test-'));
+  const wireDir = path.join(tmp, 'wire');
+  const server = await startServer(tmp);
+  server.removeAllListeners('stream');
+  server.on('stream', (stream) => { // answers the first chunk with its status, like an RPC that fails early
+    stream.on('error', () => {});
+    stream.on('data', () => {});
+    stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
+    stream.once('data', () => stream.end('early'));
+    stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '9' }));
+  });
+  const port = await freePort();
+  const proxy = spawn(mitmdump, ['-q', '--listen-host', '127.0.0.1', '-p', String(port), '-s', ADDON,
+    '--set', `wire_dir=${wireDir}`, '--set', `confdir=${path.join(tmp, 'mitm')}`, '--set', 'ssl_insecure=true'],
+  { stdio: 'ignore' });
+  t.after(() => { proxy.kill(); server.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
+
+  await waitFor(() => listening(port), 20000, 'mitmdump to listen');
+  const ca = fs.readFileSync(path.join(tmp, 'mitm', 'mitmproxy-ca-cert.pem'));
+  const session = await connectThroughProxy(port, server.address().port, ca);
+  t.after(() => session.destroy());
+  const req = session.request({ ':method': 'POST', ':path': '/early', 'content-type': 'application/grpc' });
+  req.on('error', () => {});
+  req.on('data', () => {});
+  const trailers = new Promise((resolve) => req.on('trailers', resolve));
+  req.write(Buffer.from('first'));
+  assert.strictEqual((await trailers)['grpc-status'], '9');
+
+  // The client connection stays open, yet the flow is already indexed and final.
+  const day = await waitFor(() => fs.existsSync(wireDir) && fs.readdirSync(wireDir)[0], 5000, 'the day folder');
+  const index = path.join(wireDir, day, 'flows.jsonl');
+  const entry = JSON.parse(await waitFor(() => fs.existsSync(index) && fs.readFileSync(index, 'utf8').trim(), 5000, 'flows.jsonl'));
+  const flowDir = path.join(wireDir, day, entry.dir);
+  const meta = () => JSON.parse(fs.readFileSync(path.join(flowDir, 'meta.json'), 'utf8'));
+  assert.strictEqual(meta().complete, true);
+  assert.deepStrictEqual(gunzip(path.join(flowDir, 'response.bin.gz')), Buffer.from('early'));
+
+  req.end(Buffer.from(' and late'));
+  await waitFor(() => meta().request_ended, 5000, 'the late end of the request');
+  assert.deepStrictEqual(gunzip(path.join(flowDir, 'request.bin.gz')), Buffer.from('first and late'));
+  assert.strictEqual(meta().request_bytes, 'first and late'.length);
+});

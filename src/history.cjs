@@ -11,7 +11,7 @@
 //
 // <chat>/
 //   meta.json                      name, model, workspace, message hashes in first-seen order
-//   snapshots/<lastUpdatedAt>.json token breakdown + the root message hashes at that moment
+//   snapshots/<changedAt>.json     token breakdown + the root message hashes at that moment
 //   snapshots/<lastUpdatedAt>-<n>.json  the first n of them: a model call's prompt, or a turn's end, before that update
 //   latest.json                    newest snapshot plus Cursor's usage tree
 //   chat.md                        the conversation, readable: user, agent, thinking, tool calls
@@ -66,6 +66,13 @@ function folderOwners(container) {
   ownersCache.set(container, owners);
   return owners;
 }
+
+// When a chat last changed. Cursor sets lastUpdatedAt when the user sends, and
+// conversationCheckpointLastUpdatedAt when the agent stores its state (the run's
+// last one when it ends); some subagent chats only have createdAt.
+const CHANGED_AT = `MAX(COALESCE(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt'), 0),
+  COALESCE(json_extract(value, '$.conversationCheckpointLastUpdatedAt'), 0))`;
+const changedAt = (composer) => Math.max(composer.lastUpdatedAt || 0, composer.conversationCheckpointLastUpdatedAt || 0);
 
 function chatName(db, composerId) {
   const row = db.prepare("SELECT json_extract(value, '$.name') AS name FROM cursorDiskKV WHERE key = ?").get(`composerData:${composerId}`);
@@ -142,8 +149,16 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   const hashes = store.rootMessageHashes(composer.conversationState);
   if (!hashes.length) return recorded;
   const chatDir = chatDirFor(db, dir, composerId, composer.name || 'Untitled chat');
-  const snapshotFile = path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}.json`);
-  if (fs.existsSync(snapshotFile)) return recorded;
+  const breakdown = composer.promptTokenBreakdown || {};
+  const totalUsedTokens = breakdown.totalUsedTokens ?? composer.contextTokensUsed;
+  // Unchanged since the last snapshot. Mid-run the messages change while lastUpdatedAt
+  // stays at the send time, so the messages are compared, not only the time.
+  const latest = readJson(path.join(chatDir, 'latest.json'), undefined);
+  if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
+    && (latest.messages || []).join() === hashes.join()) return recorded;
+  // Never overwrite a snapshot: two states may share a timestamp.
+  let snapshotFile = path.join(chatDir, 'snapshots', `${changedAt(composer)}.json`);
+  if (fs.existsSync(snapshotFile)) snapshotFile = snapshotFile.replace(/\.json$/, `-${Date.now()}.json`);
 
   for (const hash of hashes) {
     const blobFile = path.join(dir, 'blobs', `${hash}.json`);
@@ -153,23 +168,21 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   }
 
   // The states the chat went through since the last snapshot, written before this update's
-  // snapshot: its file marks the update as recorded.
+  // snapshot and latest.json, which mark the update as recorded.
   const summaries = store.summaryCount(composer.conversationState);
   const model = composer.modelConfig && composer.modelConfig.modelName;
-  const earlier = earlierStates(dir, hashes, summaries, readJson(path.join(chatDir, 'latest.json'), undefined));
+  const earlier = earlierStates(dir, hashes, summaries, latest);
   for (const { before, state } of earlier) {
     writeAtomic(path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}-${before}.json`), JSON.stringify({
       composerId, recordedAt: Date.now(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
     }, null, 2));
   }
-
-  const breakdown = composer.promptTokenBreakdown || {};
   const snapshot = {
     composerId,
     recordedAt: Date.now(),
     lastUpdatedAt: composer.lastUpdatedAt,
     model,
-    totalUsedTokens: breakdown.totalUsedTokens ?? composer.contextTokensUsed,
+    totalUsedTokens,
     maxTokens: breakdown.maxTokens ?? composer.contextTokenLimit,
     categories: breakdown.categories || [],
     summaries,
@@ -341,12 +354,12 @@ function writeIndex(dir) {
   writeAtomic(path.join(dir, 'index.json'), JSON.stringify(chats, null, 2));
 }
 
-// Record chats updated after `since` and up to `until` (ms), oldest first, at most
+// Record chats changed after `since` and up to `until` (ms), oldest first, at most
 // `limit` of them. Returns { recorded, watermark, more }.
 function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
   const rows = db.prepare(`
     SELECT id, t FROM (
-      SELECT substr(key, 14) AS id, COALESCE(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) AS t
+      SELECT substr(key, 14) AS id, ${CHANGED_AT} AS t
       FROM cursorDiskKV
       WHERE key LIKE 'composerData:%' AND json_extract(value, '$.conversationState') IS NOT NULL)
     WHERE t > ? AND t <= ?

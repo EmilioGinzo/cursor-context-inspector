@@ -19,13 +19,13 @@ function setup() {
     put(`agentKv:blob:${hash.toString('hex')}`, raw);
     return hash;
   };
-  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0 } = {}) => {
+  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0, ...extra } = {}) => {
     // self_summary_count is field 17, varint: tag 0x88 0x01.
     const count = summaries ? [Buffer.from([0x88, 0x01, summaries])] : [];
     const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count]);
     put(`composerData:${id}`, JSON.stringify({
       name, lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
-      promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] },
+      promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] }, ...extra,
     }));
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-history-'));
@@ -271,6 +271,20 @@ test('older chats are caught up in batches, also after an earlier 7-day backfill
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).length, 5);
   save(7000, [sys, first], { id: 'chat-6', name: 'Chat 6' });
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).backfilling], [1, false], 'new chats still recorded after the backfill');
+});
+
+// Cursor sets lastUpdatedAt when the user sends and leaves it there when the run
+// ends; a tick in between used to move the watermark past the chat for good.
+const settledState = (dir, watermark) => fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark, layout: 3, backfill: { done: true } }));
+
+test('a chat whose run ended after the watermark passed its send time is caught by the checkpoint time', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  // Status not yet set when the tick ran: nothing marks the chat as running.
+  save(1000, []);
+  history.tick(db, dir);
+  save(1000, [sys, first, answer], { status: 'completed', conversationCheckpointLastUpdatedAt: 1013 });
+  assert.strictEqual(history.tick(db, dir).recorded, 1);
 });
 
 test('a chat that cannot be read is skipped, the others are still recorded', () => {

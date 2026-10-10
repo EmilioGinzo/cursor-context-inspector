@@ -108,6 +108,18 @@ function listFlows({ root = defaultRoot(), day, grep } = {}) {
   return out;
 }
 
+// Connect errors (a unary JSON body, or the end-stream frame's `error`) carry
+// details: [{ type, value: base64 protobuf, debug? }]. Add `decoded` to each whose type the schema knows.
+function decodeErrorDetails(json, schema) {
+  const err = json && typeof json === 'object' && (json.error || json);
+  if (!schema || !err || !Array.isArray(err.details)) return;
+  for (const d of err.details) {
+    if (d && typeof d.type === 'string' && typeof d.value === 'string' && schema.messages && schema.messages[d.type]) {
+      d.decoded = protobuf.decodeMessage(schema, d.type, Buffer.from(d.value, 'base64'));
+    }
+  }
+}
+
 function decodeFrame(frame, codec, schema, typeName) {
   const out = {
     offset: frame.offset,
@@ -117,6 +129,7 @@ function decodeFrame(frame, codec, schema, typeName) {
   for (const k of ['flags', 'compressed', 'encoding', 'decompressError', 'truncated', 'truncatedReason', 'endStream', 'trailers', 'trailerHeaders', 'json', 'jsonError']) {
     if (frame[k] !== undefined && frame[k] !== false) out[k] = frame[k];
   }
+  if (out.json !== undefined) decodeErrorDetails(out.json, schema);
   if (frame.endStream || frame.trailers || frame.decompressError || out.json !== undefined || out.jsonError) {
     if (out.jsonError || frame.decompressError) out.bytes = frame.payload.toString('base64');
     return out;

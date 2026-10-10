@@ -287,7 +287,7 @@ function writeFlow(root, day, name, meta, request, response) {
 function fixtureRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-wire-'));
   const req = pb.msg(pb.len(1, 'line one\nline two'), pb.v(4, 1), pb.v(77, 9));
-  const resp = Buffer.concat([pb.envelope(0, child('reply')), pb.envelope(2, Buffer.from('{}'))]);
+  const resp = Buffer.concat([pb.envelope(0, child('reply')), pb.envelope(2, Buffer.from(JSON.stringify({ error: { code: 'internal', details: [{ type: 'test.Child', value: child('why').toString('base64').replace(/=+$/, '') }] } })))]);
   writeFlow(root, '2026-10-09', '235959-00001-old', { method: 'GET', url: 'https://x.test/', started: 100, status: 200, request_headers: [], response_headers: [['content-type', 'text/plain']] }, Buffer.alloc(0), Buffer.from('hello'));
   const run = writeFlow(root, '2026-10-10', '101500-00002-test.Svc_Run', {
     method: 'POST', url: 'https://api.test/test.Svc/Run', started: 200, status: 200,
@@ -326,6 +326,7 @@ test('decodeFlow uses the schema RPC types, or decodes schema-less', () => {
   assert.strictEqual(msg._unknown[0].no, 77);
   assert.deepStrictEqual(d.response.frames[0].message, { name: 'reply' });
   assert.strictEqual(d.response.frames[1].endStream, true);
+  assert.deepStrictEqual(d.response.frames[1].json.error.details[0].decoded, { name: 'why' });
 
   const text = renderFlow(d);
   assert.match(text, /test\.Req -> test\.Child {2}\(server_streaming\)/);
@@ -333,6 +334,18 @@ test('decodeFlow uses the schema RPC types, or decodes schema-less', () => {
   assert.match(text, /role: "ROLE_USER"/);
   assert.match(text, /#77 varint 9/);
   assert.match(text, /END-STREAM/);
+
+  assert.match(text, /decoded:\n {8}name: "why"/);
+
+  const unaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-wire-'));
+  const unary = writeFlow(unaryRoot, '2026-10-10', '101600-00003-test.Svc_Run', {
+    method: 'POST', url: 'https://api.test/test.Svc/Run', started: 300, status: 400,
+    request_headers: [['content-type', 'application/proto']],
+    response_headers: [['content-type', 'application/json']],
+  }, child('q'), Buffer.from(JSON.stringify({ code: 'invalid_argument', details: [{ type: 'test.Child', value: child('bad').toString('base64') }, { type: 'other.Type', value: 'AA' }] })));
+  const ud = flows.decodeFlow(unary, schema).response.frames[0].json.details;
+  assert.deepStrictEqual(ud[0].decoded, { name: 'bad' });
+  assert.strictEqual(ud[1].decoded, undefined);
 
   const raw = flows.decodeFlow(run, null);
   assert.strictEqual(raw.request.frames[0].raw.fields[0].string, 'line one\nline two');

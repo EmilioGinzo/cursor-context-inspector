@@ -101,6 +101,9 @@ test('schema decode keeps unknown fields, wire-type mismatches and superseded on
   const dup = protobuf.decodeMessage(schema, 'test.Req', pb.msg(pb.len(5, pb.msg(pb.len(1, 'k'), pb.len(2, 'old'))), pb.len(5, pb.msg(pb.len(1, 'k'), pb.len(2, 'new')))));
   assert.deepStrictEqual(dup.labels, { k: 'new' });
   assert.deepStrictEqual(dup._unknown, [{ no: 5, field: 'labels', key: 'k', superseded: 'old' }]);
+  const proto = protobuf.decodeMessage(schema, 'test.Req', pb.len(5, pb.msg(pb.len(1, '__proto__'), pb.len(2, 'v'))));
+  assert.deepStrictEqual(Object.keys(proto.labels), ['__proto__']);
+  assert.strictEqual(JSON.parse(JSON.stringify(proto)).labels.__proto__, 'v');
 });
 
 test('fields with unresolved schema types decode schema-less, under their names', () => {

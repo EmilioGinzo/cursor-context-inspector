@@ -320,10 +320,12 @@ function checkTools(run, addedMsgs, add) {
   const wireIds = [...calls.entries()].flatMap(([k, c]) => [k, c.modelCallId]).filter(Boolean);
   for (const [id] of recCalls) if (calls.size && !wireIds.some((w) => w === id || w.includes(id) || id.includes(w))) add('recorded-tool-call-not-on-wire', 'tool-calls', { recordedId: id });
 
-  // Tool output the client sent (exec results): is it in the recorded tool results?
+  // Tool output the client sent (exec results for a tool call): is it in the recorded tool results?
+  // Exec requests without a tool call (request context, hooks) are context: see checkRequestContext.
   const recordedResults = [...recResults.values()].map((r) => asText(r.p.result)).join('\n');
   for (const e of run.client.filter((x) => x.kind === 'exec_result')) {
     const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
+    if (!ask || !ask.args || !ask.args.tool_call_id) continue;
     for (const l of leaves(e.result)) {
       if (l.text.length < MIN_LEAF || recordedResults.includes(l.text)) continue;
       add('tool-output-not-in-recorded-result', 'tool-calls', { execId: e.id, op: e.op, toolCallId: ask && ask.args && ask.args.tool_call_id, path: l.path, text: l.text });
@@ -338,17 +340,33 @@ function toolName(c) {
 }
 
 // Strings sent with the run's action that appear nowhere in this chat's recorded messages.
+// Context comes with the action, by reference (request_context_parts blobs), or as the result of
+// an exec the server asks for without a tool call (request_context_args).
 function checkRequestContext(run, rec, add, ctx) {
-  if (!run.action || !run.action.value) return;
+  if (!run.action) return;
   const haystack = ctx.recordedText();
   const um = run.userMessage && run.userMessage.text;
-  const found = leaves(run.action.value, run.action.kind).filter((l) => l.text.length >= MIN_LEAF && l.text !== um);
-  for (const l of found) {
-    if (haystack.includes(l.text)) continue;
+  const sources = [
+    ...leaves(run.action.value, run.action.kind),
+    ...leaves(run.action.requestContextParts, 'request_context_parts'),
+  ];
+  for (const b of run.blobs.values()) {
+    const role = (b.roles || []).find((r) => /^(context_|user_message_)/.test(r.ref));
+    if (role) sources.push(...leaves(b.decoded.json !== undefined ? b.decoded.json : b.decoded.text, `blob ${b.id.slice(0, 12)} (${role.ref})`));
+  }
+  for (const e of run.client.filter((x) => x.kind === 'exec_result')) {
+    const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
+    if (!ask || !ask.args || !ask.args.tool_call_id) sources.push(...leaves(e.result, `exec #${e.id} ${e.op}`));
+  }
+  for (const l of sources) {
+    if (l.text.length < MIN_LEAF || l.text === um || haystack.includes(l.text)) continue;
     add('sent-context-not-in-record', 'request-context', { path: l.path, text: l.text });
   }
-  const tools = [...((run.request && run.request.mcp_tools && run.request.mcp_tools.mcp_tools) || []), ...(((run.action.value || {}).request_context || {}).tools || [])];
-  if (tools.length) add('client-sent-tool-definitions', 'tools-backend', { count: tools.length });
+  // Tool definitions the client sends: MCP tools with the request, or in a request context.
+  const contexts = [((run.action.value || {}).request_context), (run.action.requestContextParts || {}).dynamic_context,
+    ...run.client.filter((x) => x.kind === 'exec_result' && x.op === 'request_context_result').map((x) => x.result.success && x.result.success.request_context)];
+  const tools = [...((run.request && run.request.mcp_tools && run.request.mcp_tools.mcp_tools) || []), ...contexts.flatMap((c) => (c && c.tools) || [])];
+  if (tools.length) add('client-sent-tool-definitions', 'tools-backend', { count: tools.length, names: tools.map((x) => x.name || x.tool_name) });
 }
 
 function checkSummary(run, before, after, message, add, out) {

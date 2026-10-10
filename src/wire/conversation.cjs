@@ -69,6 +69,17 @@ function stateRefs(state, prefix = '') {
   return out;
 }
 
+// Blob ids the action refers to: context parts sent by reference, and the user message's own blobs.
+function actionRefs(action, userMessage) {
+  const out = [];
+  const parts = (action && action.request_context_parts) || {};
+  for (const k of ['rules', 'skills', 'subagents', 'mcps']) if (parts[`${k}_blob_id`]) out.push({ id: hex(parts[`${k}_blob_id`]), ref: `context_${k}`, bytes: parts[`${k}_byte_length`] });
+  for (const k of ['text_blob_id', 'rich_text_blob_id', 'conversation_state_blob_id']) {
+    if (userMessage && userMessage[k]) out.push({ id: hex(userMessage[k]), ref: `user_message_${k.replace(/_blob_id$/, '')}` });
+  }
+  return out;
+}
+
 // What a state looks like, with ids in hex (the full decoded state stays in `raw`).
 function summarizeState(state) {
   if (!state) return undefined;
@@ -139,6 +150,7 @@ function clientEvent(run, msg, where) {
       const [ak, av] = only(value.action, ['triggering_auth_id', 'triggering_user_info', 'request_context_parts']);
       run.action = { kind: ak, value: av, requestContextParts: value.action && value.action.request_context_parts };
       if (ak === 'user_message_action') run.userMessage = av.user_message;
+      for (const r of actionRefs(value.action, run.userMessage)) run.refs.push({ ...r, from: 'request' });
       for (const b of value.pre_fetched_blobs || []) addBlob(run, hex(b.id), b.value, { side: 'client', how: 'pre_fetched', where });
       Object.assign(ev, { conversationId: value.conversation_id, runId: value.run_id, model: run.model, action: ak, rootPrompt: run.initialState.rootPrompt.length, turns: run.initialState.turns.length });
       break;

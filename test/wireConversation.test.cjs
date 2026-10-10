@@ -299,6 +299,29 @@ test('compare: summarization, subagent links from the wire against the DB', (t) 
   assert.strictEqual(verdict(r, 'subagent-link'), 'contradicted');
 });
 
+test('compare: context the server asks for by exec is checked against the whole record', (t) => {
+  const { wire, history } = tmp(t);
+  const { clientMsgs, serverMsgs } = turnMessages();
+  const toolDescription = 'Search the team wiki for pages that match a query string.';
+  serverMsgs.unshift(server({ exec_server_message: { id: 3, request_context_args: { workspace_id: 'w1' } } }));
+  clientMsgs.push(client({ exec_client_message: { id: 3, request_context_result: { success: { request_context: {
+    env: { workspace_paths: ['/home/someone/projects/example-repo'] },
+    tools: [{ name: 'wiki_search', description: toolDescription }],
+  } } } } }));
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
+  writeRecord(history);
+  const [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  const f = r.runs[0].findings;
+  assert.deepStrictEqual(f.filter((x) => x.kind === 'sent-context-not-in-record').map((x) => [x.path, x.text]), [
+    ['exec #3 request_context_result.success.request_context.env.workspace_paths[0]', '/home/someone/projects/example-repo'],
+    ['exec #3 request_context_result.success.request_context.tools[0].description', toolDescription],
+  ]);
+  // Not mistaken for a tool's output.
+  assert.ok(!f.some((x) => x.kind === 'tool-output-not-in-recorded-result'));
+  assert.deepStrictEqual(f.find((x) => x.kind === 'client-sent-tool-definitions').names, ['wiki_search']);
+  assert.strictEqual(verdict(r, 'tools-backend'), 'contradicted');
+});
+
 test('diffText and outOfOrder', () => {
   assert.deepStrictEqual(compareLib.diffText('same', 'same'), { same: true });
   const d = compareLib.diffText('a\nb\nc\nd', 'a\nB\nc\nd');

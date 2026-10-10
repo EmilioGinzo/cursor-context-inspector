@@ -122,6 +122,15 @@
      "opt": true
     },
     {
+     "no": 4,
+     "name": "mcp_tools",
+     "kind": "message",
+     "T": "agent.v1.McpTools",
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
      "no": 5,
      "name": "conversation_id",
      "kind": "scalar",
@@ -1051,6 +1060,24 @@
      "opt": false
     },
     {
+     "no": 4,
+     "name": "env",
+     "kind": "message",
+     "T": "agent.v1.RequestContextEnv",
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 7,
+     "name": "tools",
+     "kind": "message",
+     "T": "agent.v1.McpToolDefinition",
+     "repeated": true,
+     "oneof": null,
+     "opt": false
+    },
+    {
      "no": 8,
      "name": "conversation_notes_listing",
      "kind": "scalar",
@@ -1421,6 +1448,372 @@
     {
      "no": 15,
      "name": "is_required",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    }
+   ]
+  },
+  "agent.v1.RequestContextEnv": {
+   "fields": [
+    {
+     "no": 1,
+     "name": "os_version",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 2,
+     "name": "workspace_paths",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": true,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 3,
+     "name": "shell",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 5,
+     "name": "sandbox_enabled",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 7,
+     "name": "terminals_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 8,
+     "name": "agent_shared_notes_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 9,
+     "name": "agent_conversation_notes_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 10,
+     "name": "time_zone",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 11,
+     "name": "project_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 12,
+     "name": "agent_transcripts_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 13,
+     "name": "artifacts_folder",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 14,
+     "name": "sandbox_supported",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 16,
+     "name": "sandbox_network_has_defaults",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 17,
+     "name": "sandbox_network_explicit_allowlist",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": true,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 18,
+     "name": "secret_redaction_enabled",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 19,
+     "name": "computer_use_supported",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 20,
+     "name": "is_working_dir_home_dir",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 21,
+     "name": "process_working_directory",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 22,
+     "name": "smart_mode_classifier_auto_mode_enabled",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 23,
+     "name": "dev_force_next_smart_mode_classifier_block_token",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 24,
+     "name": "dev_delay_next_smart_mode_classifier_token",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    }
+   ]
+  },
+  "agent.v1.McpToolDefinition": {
+   "fields": [
+    {
+     "no": 1,
+     "name": "name",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 4,
+     "name": "provider_identifier",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 5,
+     "name": "tool_name",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 2,
+     "name": "description",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 6,
+     "name": "input_schema_json",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 7,
+     "name": "output_schema_json",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 8,
+     "name": "annotations_json",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    }
+   ]
+  },
+  "agent.v1.McpTools": {
+   "fields": [
+    {
+     "no": 1,
+     "name": "mcp_tools",
+     "kind": "message",
+     "T": "agent.v1.McpToolDefinition",
+     "repeated": true,
+     "oneof": null,
+     "opt": false
+    }
+   ]
+  },
+  "agent.v1.RequestContextArgs": {
+   "fields": [
+    {
+     "no": 2,
+     "name": "notes_session_id",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 3,
+     "name": "workspace_id",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 4,
+     "name": "read_only_pinned_tree_sha",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 5,
+     "name": "read_only_plugin_cache_root",
+     "kind": "scalar",
+     "T": 9,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 7,
+     "name": "use_cached",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    },
+    {
+     "no": 8,
+     "name": "wait_for_workspace_cache",
+     "kind": "scalar",
+     "T": 8,
+     "repeated": false,
+     "oneof": null,
+     "opt": true
+    }
+   ]
+  },
+  "agent.v1.RequestContextResult": {
+   "fields": [
+    {
+     "no": 1,
+     "name": "success",
+     "kind": "message",
+     "T": "agent.v1.RequestContextSuccess",
+     "repeated": false,
+     "oneof": "result",
+     "opt": false
+    }
+   ]
+  },
+  "agent.v1.RequestContextSuccess": {
+   "fields": [
+    {
+     "no": 1,
+     "name": "request_context",
+     "kind": "message",
+     "T": "agent.v1.RequestContext",
+     "repeated": false,
+     "oneof": null,
+     "opt": false
+    },
+    {
+     "no": 2,
+     "name": "served_from_disk_cache",
      "kind": "scalar",
      "T": 8,
      "repeated": false,
@@ -1836,6 +2229,15 @@
      "opt": false
     },
     {
+     "no": 10,
+     "name": "request_context_result",
+     "kind": "message",
+     "T": "agent.v1.RequestContextResult",
+     "repeated": false,
+     "oneof": "message",
+     "opt": false
+    },
+    {
      "no": 55,
      "name": "mini_swe_agent_bash_result",
      "kind": "message",
@@ -1898,6 +2300,15 @@
      "name": "redacted_read_args",
      "kind": "message",
      "T": "agent.v1.ReadArgs",
+     "repeated": false,
+     "oneof": "message",
+     "opt": false
+    },
+    {
+     "no": 10,
+     "name": "request_context_args",
+     "kind": "message",
+     "T": "agent.v1.RequestContextArgs",
      "repeated": false,
      "oneof": "message",
      "opt": false

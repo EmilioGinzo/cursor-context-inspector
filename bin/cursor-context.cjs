@@ -5,7 +5,7 @@
 //   cursor-context [--list] [--chat <id>] [--show <categoryId|itemId>] [--db <path>]
 // and inspect captured client<->server traffic (see src/wire/cli.cjs):
 //   cursor-context wire ls [--day YYYY-MM-DD] [--grep text]
-//   cursor-context wire show <flowdir|index> [--raw] [--json] [--clip N]
+//   cursor-context wire show <flow dir or name> [--raw] [--json] [--clip N] [--schema file.json]
 
 const args = process.argv.slice(2);
 

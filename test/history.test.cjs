@@ -276,6 +276,32 @@ test('older chats are caught up in batches, also after an earlier 7-day backfill
 // Cursor sets lastUpdatedAt when the user sends and leaves it there when the run
 // ends; a tick in between used to move the watermark past the chat for good.
 const settledState = (dir, watermark) => fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark, layout: 3, backfill: { done: true } }));
+const snapshots = (dir, name = 'History chat') => fs.readdirSync(path.join(dir, 'chats', name, 'snapshots')).sort();
+
+test('a chat ticked before its run stored any state is recorded when the run ends', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  save(1000, [], { status: 'generating' });
+  assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [0, 1], 'nothing to record yet, kept for later');
+  save(1000, [sys, first, answer], { status: 'completed', conversationCheckpointLastUpdatedAt: 1013 });
+  assert.strictEqual(history.tick(db, dir).recorded, 1);
+  assert.deepStrictEqual(snapshots(dir), ['1013.json']);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8')).seen.length, 3);
+  assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [0, 0], 'settled: no longer re-checked');
+});
+
+test('a chat recorded mid-run is recorded again when the run ends without a newer timestamp', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  save(1000, [sys, first], { status: 'generating' });
+  assert.strictEqual(history.tick(db, dir).recorded, 1);
+  // No checkpoint time either: only the pending list brings the chat back.
+  save(1000, [sys, first, answer], { status: 'completed' });
+  assert.strictEqual(history.tick(db, dir).recorded, 1);
+  const recorded = snapshots(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'snapshots', f), 'utf8')));
+  assert.deepStrictEqual(recorded.map((x) => x.messages.length).sort(), [2, 3], 'the mid-run snapshot is kept, beside the complete one');
+  assert.strictEqual(history.tick(db, dir).recorded, 0);
+});
 
 test('a chat whose run ended after the watermark passed its send time is caught by the checkpoint time', () => {
   const { db, save, dir } = setup();
@@ -285,6 +311,13 @@ test('a chat whose run ended after the watermark passed its send time is caught 
   history.tick(db, dir);
   save(1000, [sys, first, answer], { status: 'completed', conversationCheckpointLastUpdatedAt: 1013 });
   assert.strictEqual(history.tick(db, dir).recorded, 1);
+});
+
+test('a chat stuck unsettled is given up after a day', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys], { status: 'generating' });
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3, backfill: { done: true }, pending: { 'chat-1': Date.now() - 2 * 86400000 } }));
+  assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [1, 0]);
 });
 
 test('a chat that cannot be read is skipped, the others are still recorded', () => {

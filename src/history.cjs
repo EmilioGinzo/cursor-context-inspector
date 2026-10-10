@@ -354,8 +354,18 @@ function writeIndex(dir) {
   writeAtomic(path.join(dir, 'index.json'), JSON.stringify(chats, null, 2));
 }
 
+// A chat still running, or whose prompt messages Cursor has not all written yet.
+// It can change without a newer timestamp, so it is checked again until it settles.
+function unsettled(db, dir, composerId) {
+  const raw = store.getValue(db, `composerData:${composerId}`);
+  if (raw === undefined) return false;
+  const composer = JSON.parse(raw);
+  if (composer.status === 'generating' || (composer.generatingBubbleIds || []).length) return true;
+  return store.rootMessageHashes(composer.conversationState).some((h) => !fs.existsSync(path.join(dir, 'blobs', `${h}.json`)));
+}
+
 // Record chats changed after `since` and up to `until` (ms), oldest first, at most
-// `limit` of them. Returns { recorded, watermark, more }.
+// `limit` of them. Returns { recorded, watermark, more, unsettled } (unsettled: { id: changedAt }).
 function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1 } = {}) {
   const rows = db.prepare(`
     SELECT id, t FROM (
@@ -366,17 +376,39 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
     ORDER BY t LIMIT ?`).all(since, until, limit);
   let recorded = 0;
   let watermark = since;
+  const pending = {};
   for (const r of rows) {
     // One unreadable chat must not stop the others (or the backfill) for good.
     try {
       recorded += recordChat(db, r.id, dir);
+      if (unsettled(db, dir, r.id)) pending[r.id] = r.t;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${r.id}:`, err);
     }
     watermark = Math.max(watermark, r.t);
   }
   if (recorded) writeIndex(dir);
-  return { recorded, watermark, more: limit >= 0 && rows.length === limit };
+  return { recorded, watermark, more: limit >= 0 && rows.length === limit, unsettled: pending };
+}
+
+// Records the chats left unsettled by earlier ticks again. `pending` maps each to when
+// it was first found unsettled. Returns { recorded, pending }: those still unsettled.
+// A chat stuck unsettled (e.g. a blob Cursor never wrote) is given up after
+// `PENDING_MS`; its later changes still reach the recorder by timestamp.
+const PENDING_MS = 86400000;
+function recordPending(db, dir, pending, now) {
+  let recorded = 0;
+  const still = {};
+  for (const [id, since] of Object.entries(pending)) {
+    try {
+      recorded += recordChat(db, id, dir);
+      if (now - since < PENDING_MS && unsettled(db, dir, id)) still[id] = since;
+    } catch (err) {
+      console.error(`[context-inspector] could not record chat ${id}:`, err);
+    }
+  }
+  if (recorded) writeIndex(dir);
+  return { recorded, pending: still };
 }
 
 // One recorder per machine: several Cursor windows share the history directory.
@@ -412,20 +444,25 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000 }
   const migrated = migrateLayout(db, dir);
   const relayout = migrated || state.layout !== LAYOUT;
   if (relayout) rebuildTranscripts(db, dir);
+  const before = JSON.stringify([state.backfill, state.pending || {}]);
+  const again = recordPending(db, dir, state.pending || {}, now);
   const result = recordUpdatedSince(db, dir, state.watermark);
-  let { recorded } = result;
-  const before = JSON.stringify(state.backfill);
+  let recorded = again.recorded + result.recorded;
+  const pending = { ...again.pending };
+  for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
   if (!state.backfill.done) {
     const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch });
     recorded += older.recorded;
+    // Only recent chats wait to settle: an old one stuck unsettled would be retried for nothing.
+    for (const [id, t] of Object.entries(older.unsettled)) if (now - t < PENDING_MS) pending[id] = pending[id] || now;
     // One ms back: chats sharing the batch's last timestamp may not all be in it.
     state.backfill = older.more ? { ...state.backfill, from: older.watermark - 1 } : { done: true };
   }
   if (relayout && !recorded) writeIndex(dir);
-  if (relayout || result.watermark !== state.watermark || JSON.stringify(state.backfill) !== before) {
-    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, backfill: state.backfill }));
+  if (relayout || result.watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
+    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done };
+  return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length };
 }
 
 module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex };

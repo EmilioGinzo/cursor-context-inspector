@@ -239,9 +239,10 @@ Captures go to `~/.cursor-wire/<day>/`, one folder per request, with
 `meta.json` (method, URL, headers, status, trailers such as `grpc-status`,
 timings), `request.bin.gz` and `response.bin.gz` (the exact body bytes, streamed
 as they pass), plus one line per request in `flows.jsonl`. Nothing is capped or
-dropped. Authorization, cookie and API key headers are redacted in `meta.json`,
-but the bodies are kept whole: they hold your prompts and code, so treat the
-folder like the chats themselves. `cursor-context wire ls|show` decodes them
+dropped. Authorization, cookie and API key headers, and secret-looking query
+parameters, are redacted in `meta.json`, but the bodies are kept whole: they
+hold your prompts, code and login tokens, so treat the folder like the chats
+themselves. `cursor-context wire ls|show` decodes them
 (added on a separate branch).
 
 To undo: `tools/cursor-wire stop`, `tools/cursor-wire ca remove`, then

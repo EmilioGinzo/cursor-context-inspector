@@ -14,8 +14,9 @@ streams), and every chunk is appended, gzipped, as it passes. One folder per flo
   websocket.jsonl.gz   one line per WebSocket message, if the flow upgrades
 and one line per finished flow in <wire_dir>/<day>/flows.jsonl.
 
-Nothing is capped or discarded. Authorization, cookie and API key values are
-redacted in meta.json; bodies are kept as they are.
+Nothing is capped or discarded. Authorization, cookie and API key values, and
+query parameters named like secrets, are redacted in meta.json and flows.jsonl;
+bodies are kept as they are.
 """
 
 import base64
@@ -29,15 +30,26 @@ import time
 from mitmproxy import ctx, http
 
 SECRET_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key"}
-SECRET_PATTERN = re.compile(r"(token|secret|password|api[-_]?key)", re.I)
+SECRET_PATTERN = re.compile(r"(token|secret|password|api[-_]?key|verifier)", re.I)
 counter = itertools.count(1)
 
 
 def redact(h):
     if h is None:
         return None
-    return [[k, "[redacted]" if k.lower() in SECRET_HEADERS or SECRET_PATTERN.search(k) else v]
+    return [[k, "[redacted]" if k.lower() in SECRET_HEADERS or SECRET_PATTERN.search(k)
+             else redact_url(v) if k.lower() == "location" else v]
             for k, v in h.items(multi=True)]
+
+
+def redact_url(url):
+    """Query parameters named like a secret (access_token=, verifier=...) lose their value."""
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    params = [p.split("=", 1)[0] + "=[redacted]" if SECRET_PATTERN.search(p.split("=", 1)[0]) else p
+              for p in query.split("&")]
+    return base + "?" + "&".join(params)
 
 
 class Body:
@@ -118,7 +130,7 @@ class CursorWire:
         body = lambda side: flow.metadata[f"wire_{side}"].bytes if f"wire_{side}" in flow.metadata else 0
         meta = {
             "method": r.method,
-            "url": r.pretty_url,
+            "url": redact_url(r.pretty_url),
             "http_version": r.http_version,
             "client": list(flow.client_conn.peername or []),
             "server": list(flow.server_conn.peername or []) if flow.server_conn else [],

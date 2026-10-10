@@ -104,7 +104,7 @@ test('cursor-wire records a bidirectional HTTP/2 stream byte-exact and redacts s
   // either direction would hang here.
   const chunks = [Buffer.from([0, 0, 0, 0, 3, 1, 2, 3]), Buffer.alloc(70000, 0xab), Buffer.from('last frame é')];
   const req = session.request({
-    ':method': 'POST', ':path': '/aiserver.v1.AgentService/Run?x=1', 'content-type': 'application/grpc',
+    ':method': 'POST', ':path': '/aiserver.v1.AgentService/Run?x=1&access_token=query-secret', 'content-type': 'application/grpc',
     authorization: 'Bearer client-secret', cookie: 'a=cookie-secret', 'x-session-id': 'keep-me',
   });
   let received = Buffer.alloc(0);
@@ -129,7 +129,7 @@ test('cursor-wire records a bidirectional HTTP/2 stream byte-exact and redacts s
   const entry = JSON.parse(line);
   assert.strictEqual(entry.method, 'POST');
   assert.strictEqual(entry.status, 200);
-  assert.match(entry.url, /\/aiserver\.v1\.AgentService\/Run\?x=1$/);
+  assert.match(entry.url, /\/aiserver\.v1\.AgentService\/Run\?x=1&access_token=\[redacted\]$/);
   assert.strictEqual(entry.request_bytes, Buffer.concat(chunks).length);
   assert.strictEqual(entry.response_bytes, expected.length);
 
@@ -147,7 +147,7 @@ test('cursor-wire records a bidirectional HTTP/2 stream byte-exact and redacts s
   assert.strictEqual(header(meta.request_headers, 'x-session-id'), 'keep-me');
   assert.strictEqual(header(meta.response_headers, 'set-cookie'), '[redacted]');
   assert.strictEqual(header(meta.response_trailers, 'grpc-status'), '0');
-  for (const secret of ['client-secret', 'cookie-secret', 'server-secret']) {
+  for (const secret of ['client-secret', 'cookie-secret', 'server-secret', 'query-secret']) {
     assert.ok(!metaText.includes(secret), `${secret} leaked into meta.json`);
     assert.ok(!line.includes(secret), `${secret} leaked into flows.jsonl`);
   }

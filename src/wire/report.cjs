@@ -87,6 +87,23 @@ function findingText(f, clip) {
   return `! ${kind}${assumption ? ` [${assumption}]` : ''}${fields.length ? `\n${indent(fields.join('\n'), '    ')}` : ''}`;
 }
 
+// Findings in order; a kind with many { path, text } items prints one line per item.
+function renderFindings(list, clip) {
+  const out = [];
+  const byKind = new Map();
+  for (const f of list) byKind.set(f.kind, [...(byKind.get(f.kind) || []), f]);
+  for (const [kind, fs] of byKind) {
+    if (fs.length > 3 && fs.every((f) => f.path !== undefined && typeof f.text === 'string')) {
+      const chars = fs.reduce((n, f) => n + f.text.length, 0);
+      const matches = fs.reduce((m, f) => ({ ...m, [f.match || '-']: (m[f.match || '-'] || 0) + 1 }), {});
+      out.push(`! ${kind}${fs[0].assumption ? ` [${fs[0].assumption}]` : ''}: ${fs.length} items, ${chars} chars, match ${JSON.stringify(matches)}`);
+      const lineClip = clip ? Math.min(clip, 100) : 0;
+      for (const f of fs) out.push(`    ${f.path} (${f.text.length} chars${f.match ? `, ${f.match}` : ''}): ${JSON.stringify(clipText(f.text, lineClip))}`);
+    } else for (const f of fs) out.push(findingText(f, clip));
+  }
+  return out;
+}
+
 function renderComparison(r, { clip = 400 } = {}) {
   const out = [`== conversation ${r.conversationId}`];
   out.push(r.chat ? `   recorded as "${r.chat.name}" (${r.chat.dir}): ${r.chat.seen} messages seen, ${r.chat.snapshots} snapshots` : '   not recorded by the plugin');
@@ -98,13 +115,13 @@ function renderComparison(r, { clip = 400 } = {}) {
     }
     if (run.added && run.added.length) out.push(`   added: ${run.added.map((a) => `${short(a.id)} ${a.role}[${a.parts.join(',')}]`).join('  ')}`);
     if (run.summary) out.push(`   summary: ${JSON.stringify(run.summary)}`);
-    for (const f of run.findings) out.push(indent(findingText(f, clip), '   '));
+    for (const l of renderFindings(run.findings, clip)) out.push(indent(l, '   '));
     if (!run.findings.length) out.push('   no differences');
   });
   if (r.subagents && r.subagents.length) out.push('', `subagents on the wire: ${r.subagents.map((s) => `${s.toolCallId} -> ${s.subagentId} (${s.from})`).join(', ')}`);
   if (r.findings.length) {
     out.push('', 'conversation:');
-    for (const f of r.findings) out.push(indent(findingText(f, clip), '   '));
+    for (const l of renderFindings(r.findings, clip)) out.push(indent(l, '   '));
   }
   out.push('', 'plugin assumptions:');
   for (const a of r.assumptions) out.push(`   ${a.verdict.toUpperCase().padEnd(12)} ${a.id}${a.findings ? ` (${a.findings}: ${a.kinds.join(', ')})` : ''}\n${' '.repeat(16)}${a.statement}`);

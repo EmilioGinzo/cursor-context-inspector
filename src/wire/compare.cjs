@@ -130,6 +130,26 @@ function leaves(v, at = '', out = []) {
   return out;
 }
 
+// Ids and handles the client sends that are not prompt content.
+const NOT_CONTENT = /(_blob_id|(^|\.)message_id|_id)$/;
+
+// How `text` appears in `haystack` when not verbatim: 'whitespace' (equal once runs of whitespace are
+// collapsed), 'prefix' (its first 40 chars are there: shortened), 'lines' (90% of its lines end a
+// recorded line: e.g. numbered), or 'none'.
+const collapse = (t) => t.replace(/\s+/g, ' ').trim();
+function looseMatch(text, haystack, cache) {
+  if (!cache.collapsed) cache.collapsed = collapse(haystack);
+  if (cache.collapsed.includes(collapse(text))) return 'whitespace';
+  if (text.length > 40 && haystack.includes(text.slice(0, 40))) return 'prefix';
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    if (!cache.lines) cache.lines = haystack.split('\n').map((l) => l.trim());
+    const hit = lines.filter((l) => cache.lines.some((x) => x.endsWith(l))).length;
+    if (hit / lines.length >= 0.9) return 'lines';
+  }
+  return 'none';
+}
+
 // A compact diff of two texts: common prefix/suffix trimmed, the middle diffed by line.
 // Returns { same, prefix, suffix, lines: [{ op: ' '|'-'|'+', text }] } — '-' is the wire, '+' the record.
 function diffText(a, b) {
@@ -270,13 +290,18 @@ function checkAgentStream(run, addedMsgs, add) {
   const assistant = addedMsgs.filter((x) => x.m.role === 'assistant').flatMap((x) => parts(x.m).map((p) => ({ id: x.id, p })));
   const texts = assistant.filter((a) => a.p.type === 'text').map((a) => a.p.text || '');
   const thoughts = assistant.filter((a) => a.p.type === 'reasoning' || a.p.type === 'redacted-reasoning').map((a) => a.p.text || '');
+  // Cursor also stores each step (thinking, agent text, tool call with result) as a ConversationStep
+  // blob under the conversation's turns; the plugin reads only the prompt messages.
+  const steps = [...run.blobs.values()].filter((b) => b.roles.some((r) => r.ref === 'turn_step') && b.decoded.message).map((b) => b.decoded.message);
+  const stepText = { text: steps.map((m) => m.assistant_message && m.assistant_message.text), thinking: steps.map((m) => m.thinking_message && m.thinking_message.text) };
+  const recordedAs = [...new Set(assistant.map((a) => a.p.type).filter((t) => t !== 'text' && t !== 'tool-call'))];
   const check = (kind, recorded) => {
     const joined = recorded.join('\n');
     for (const e of run.server.filter((x) => x.kind === kind)) {
       if (!e.text.trim()) continue;
       if (recorded.some((t) => t === e.text) || joined.includes(e.text)) continue;
       const nearest = recorded.map((t) => diffText(e.text, t)).sort((a, b) => b.firstDifference - a.firstDifference)[0];
-      add(`streamed-${kind}-not-recorded`, 'agent-text', { where: e.where, wireText: e.text, deltas: e.deltas, diff: nearest });
+      add(`streamed-${kind}-not-recorded`, 'agent-text', { where: e.where, wireText: e.text, deltas: e.deltas, inTurnSteps: stepText[kind].includes(e.text), recordedAs: kind === 'thinking' ? recordedAs : undefined, diff: nearest });
     }
   };
   check('text', texts);
@@ -323,12 +348,16 @@ function checkTools(run, addedMsgs, add) {
   // Tool output the client sent (exec results for a tool call): is it in the recorded tool results?
   // Exec requests without a tool call (request context, hooks) are context: see checkRequestContext.
   const recordedResults = [...recResults.values()].map((r) => asText(r.p.result)).join('\n');
+  const cache = {};
   for (const e of run.client.filter((x) => x.kind === 'exec_result')) {
     const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
     if (!ask || !ask.args || !ask.args.tool_call_id) continue;
     for (const l of leaves(e.result)) {
-      if (l.text.length < MIN_LEAF || recordedResults.includes(l.text)) continue;
-      add('tool-output-not-in-recorded-result', 'tool-calls', { execId: e.id, op: e.op, toolCallId: ask && ask.args && ask.args.tool_call_id, path: l.path, text: l.text });
+      if (l.text.length < MIN_LEAF || NOT_CONTENT.test(l.path) || recordedResults.includes(l.text)) continue;
+      const match = looseMatch(l.text, recordedResults, cache);
+      const detail = { execId: e.id, op: e.op, toolCallId: ask.args.tool_call_id, path: l.path, match, text: l.text };
+      if (match === 'none') add('tool-output-not-in-recorded-result', 'tool-calls', detail);
+      else add('tool-output-reformatted-in-record', undefined, detail);
     }
   }
 }
@@ -358,9 +387,12 @@ function checkRequestContext(run, rec, add, ctx) {
     const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
     if (!ask || !ask.args || !ask.args.tool_call_id) sources.push(...leaves(e.result, `exec #${e.id} ${e.op}`));
   }
+  const cache = ctx.looseCache;
   for (const l of sources) {
-    if (l.text.length < MIN_LEAF || l.text === um || haystack.includes(l.text)) continue;
-    add('sent-context-not-in-record', 'request-context', { path: l.path, text: l.text });
+    if (l.text.length < MIN_LEAF || l.text === um || NOT_CONTENT.test(l.path) || haystack.includes(l.text)) continue;
+    const match = looseMatch(l.text, haystack, cache);
+    if (match === 'none') add('sent-context-not-in-record', 'request-context', { path: l.path, match, text: l.text });
+    else add('sent-context-reformatted-in-record', undefined, { path: l.path, match, text: l.text });
   }
   // Tool definitions the client sends: MCP tools with the request, or in a request context.
   const contexts = [((run.action.value || {}).request_context), (run.action.requestContextParts || {}).dynamic_context,
@@ -385,6 +417,7 @@ function checkSummary(run, before, after, message, add, out) {
 function compareConversation(conv, rec) {
   const ctx = {
     userTextChecks: 0,
+    looseCache: {},
     recordedText: (() => {
       let cache;
       return () => {
@@ -468,7 +501,7 @@ function rate(report, ctx = { userTextChecks: 0 }) {
   };
   return Object.entries(ASSUMPTIONS).map(([id, statement]) => {
     const against = all.filter((f) => f.assumption === id);
-    const verdict = against.length ? 'contradicted' : checked[id] ? 'holds' : 'unverified';
+    const verdict = against.length ? 'contradicted' : checked[id] && report.chat ? 'holds' : 'unverified';
     return { id, statement, verdict, findings: against.length, kinds: [...new Set(against.map((f) => f.kind))] };
   });
 }

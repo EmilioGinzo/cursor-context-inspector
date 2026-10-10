@@ -322,6 +322,43 @@ test('compare: context the server asks for by exec is checked against the whole 
   assert.strictEqual(verdict(r, 'tools-backend'), 'contradicted');
 });
 
+test('compare: thinking kept only as turn steps, and context reformatted in the prompt, are told apart', (t) => {
+  const { wire, history } = tmp(t);
+  const { clientMsgs, serverMsgs } = turnMessages();
+  // The step blobs Cursor stores under the turn: the visible thinking and text, and the user message
+  // (whose own state blob is followed too).
+  const state = enc('agent.v1.ConversationStateStructure', { root_prompt_messages_json: ids('sys', 'u0', 'a0') });
+  const um = enc('agent.v1.UserMessage', { text: 'list the files', conversation_state_blob_id: sha(state) });
+  const st = [enc('agent.v1.ConversationStep', { thinking_message: { text: 'Let me look.' } }), enc('agent.v1.ConversationStep', { assistant_message: { text: 'Here are the files.' } })];
+  const turn = enc('agent.v1.ConversationTurnStructure', { agent_conversation_turn: { user_message: sha(um), steps: st.map(sha) } });
+  const cp = serverMsgs.findIndex((m) => m.equals(server({ conversation_checkpoint_update: { root_prompt_messages_json: ids('sys', 'u0', 'a0', 'u1', 'a1', 't1', 'a2') } })));
+  serverMsgs.splice(cp, 1,
+    ...[state, um, ...st, turn].map((d, i) => server({ kv_server_message: { id: 30 + i, set_blob_args: { blob_id: sha(d), blob_data: d } } })),
+    server({ conversation_checkpoint_update: { root_prompt_messages_json: ids('sys', 'u0', 'a0', 'u1', 'a1', 't1', 'a2'), turns: [sha(turn)] } }));
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
+  // Recorded: reasoning only encrypted; the rule shortened; the shell output numbered.
+  const short = RULE.slice(0, 45);
+  writeRecord(history, { edit: {
+    u1: Buffer.from(M.u1.data.toString().replace(RULE, short)),
+    a1: Buffer.from(JSON.stringify({ ...M.a1.message, content: [{ type: 'redacted-reasoning', data: 'opaque' }, M.a1.message.content[1]] })),
+    t1: Buffer.from(JSON.stringify({ ...M.t1.message, content: [{ ...M.t1.message.content[0], result: STDOUT.split('\n').map((l, i) => `${i + 1}|${l}`).join('\n') }] })),
+  } });
+  const { conversations } = conversation.reconstruct({ root: wire, schema });
+  const [run] = conversations[0].runs;
+  assert.ok([...run.blobs.values()].every((b) => b.roles.length), 'every blob is referenced');
+  assert.deepStrictEqual(run.blobs.get(sha(state).toString('hex')).roles.map((r) => r.ref), ['user_message_conversation_state']);
+  const [r] = compareLib.compare({ conversations, historyDir: history });
+  const f = r.runs[0].findings;
+  const thinking = f.find((x) => x.kind === 'streamed-thinking-not-recorded');
+  assert.deepStrictEqual([thinking.inTurnSteps, thinking.recordedAs], [true, ['redacted-reasoning']]);
+  assert.deepStrictEqual(f.filter((x) => /reformatted/.test(x.kind)).map((x) => [x.kind, x.match]), [
+    ['tool-output-reformatted-in-record', 'lines'],
+    ['sent-context-reformatted-in-record', 'prefix'],
+  ]);
+  assert.ok(!f.some((x) => x.kind === 'sent-context-not-in-record'));
+  assert.strictEqual(verdict(r, 'tool-calls'), 'holds');
+});
+
 test('diffText and outOfOrder', () => {
   assert.deepStrictEqual(compareLib.diffText('same', 'same'), { same: true });
   const d = compareLib.diffText('a\nb\nc\nd', 'a\nB\nc\nd');

@@ -38,6 +38,8 @@ const WEBPACK_MAIN = [
   '20:(e,t,r)=>{"use strict";r.d(t,{a:()=>l,K:()=>u});var n=r(99),s=r(10);const o="agent.v1.";',
   'class i extends s.HL{static get runtime(){return(0,s.kU)(this,"runtime",n.proto3)}static $p(){return o}}',
   'var u=(0,s.QT)(n.proto3,o,"ShellKind",[[0,"UNSPECIFIED"],[1,"LOCAL"]],1),c=(0,s.QT)(n.proto3,o,"Raw",[[0,"RAW_ZERO"],[1,"RAW_ONE"]]);',
+  // Enums inside comma expressions, and with the helper required inline.
+  'var w=(n.proto3,n.proto3,(0,s.QT)(n.proto3,o,"Mode",[[0,"UNSPECIFIED"],[1,"FAST"]],1)),x=(0,r(10).QT)(n.proto3,"agent.v1.","Inline",[[0,"INLINE_A"]]);',
   'class l extends i{constructor(e){super(),n.proto3.util.initPartial(e,this)}static equals(e,t){return n.proto3.util.equals(l,e,t)}',
   'static $(){return["ShellArgs|1 command 9|2 kind #0|3 env 9,9|4 raw #1?|5 kinds 9,#0",u,c]}}},',
   '30:(e,t,r)=>{"use strict";r.d(t,{S:()=>p});var n=r(99),s=r(10),a=r(20),q=r(50);',
@@ -169,6 +171,8 @@ test('reads compact classes across webpack modules and chunks', () => {
   // Mode 1 enums list names without the ENUM_NAME_ prefix; others in full.
   assert.deepStrictEqual(s.enums['agent.v1.ShellKind'], { 0: 'SHELL_KIND_UNSPECIFIED', 1: 'SHELL_KIND_LOCAL' });
   assert.deepStrictEqual(s.enums['agent.v1.Raw'], { 0: 'RAW_ZERO', 1: 'RAW_ONE' });
+  assert.deepStrictEqual(s.enums['agent.v1.Mode'], { 0: 'MODE_UNSPECIFIED', 1: 'MODE_FAST' });
+  assert.deepStrictEqual(s.enums['agent.v1.Inline'], { 0: 'INLINE_A' });
 
   assert.deepStrictEqual(s.services['agent.v1.AgentService'].methods.Run,
     { I: 'agent.v1.ShellArgs', O: 'agent.v1.ShellCall', kind: 'bidi_streaming' });

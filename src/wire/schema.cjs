@@ -354,7 +354,9 @@ function scanFile(file, src) {
       addDef(cls.name, def);
     });
   }
-  const compactEnumRe = /([\w$]+)=(?:\(0,[\w$.]+\)|[\w$]+)\([\w$.]+,([\w$]+|"[\w.]*"),"([\w.]+)",\[\[/g;
+  // The callee may be (0,s.QT), (0,r(8592).QT) or QT, and the assignment a
+  // comma expression: rn=(n.proto3,n.proto3,(0,o.QT)(...)).
+  const compactEnumRe = /([\w$]+)=(?:\((?:[\w$.]+,)+)?(?:\(0,(?:[\w$]+\(\d+\)\.)?[\w$.]+\)|[\w$]+)\([\w$.]+,([\w$]+|"[\w.]*"),"([\w.]+)",\[\[(?=-?\d)/g;
   for (let m; (m = compactEnumRe.exec(src));) {
     tryParse(() => {
       const open = m.index + m[0].length - 2;

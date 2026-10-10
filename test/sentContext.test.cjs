@@ -263,3 +263,23 @@ test('credentials in the context are never stored: the part keeps the sent id an
   assert.match(md, /Rules\]\([^)]*\): \d+ items, \d+ bytes, `[0-9a-f]{12}` — 1 credential redacted/);
   assert.match(md, /Credentials replaced by `\[redacted\]` in 1 place \(git_repos\[0\]\.remote_url\): the stored copy differs from what was rebuilt there only\./);
 });
+
+test('a user message whose blob Cursor writes late still gets its context', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const q = { role: 'user', content: '<user_query>\nlate\n</user_query>' };
+  save('c', Date.now(), [{ role: 'system', content: 'You are an agent.' }, q]);
+  const blob = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?').get(`agentKv:blob:${hashOf(q)}`).value;
+  db.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`agentKv:blob:${hashOf(q)}`);
+  const dir = path.join(root, 'history');
+  const options = { sentContext: { enabled: true, appDir: APP, home } };
+  const meta = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8'));
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.strictEqual(meta().sentContext, undefined, 'not known as a user message yet');
+  // The chat is otherwise unchanged: the blob alone arrives.
+  put(`agentKv:blob:${hashOf(q)}`, blob);
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.deepStrictEqual(meta().sentContext.map((e) => e.messages), [[hashOf(q)]]);
+  assert.match(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8'), /Context sent with this message, rebuilt/);
+});

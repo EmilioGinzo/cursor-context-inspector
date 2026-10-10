@@ -5,12 +5,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
 const rc = require('../src/requestContext.cjs');
 const sources = require('../src/contextSources.cjs');
+const history = require('../src/history.cjs');
 
 const APP = sources.DEFAULT_APP_DIR;
 const haveCursor = fs.existsSync(path.join(APP, 'node_modules', 'gray-matter'));
@@ -105,4 +108,108 @@ test('workspace folders come from the chat\'s folder or .code-workspace file', (
   assert.deepStrictEqual(sources.workspaceFolders({ configPath: { fsPath: file } }), [path.join(d, 'one'), '/abs/two', '/abs/three']);
   assert.deepStrictEqual(sources.workspaceFolders({ uri: { fsPath: '/x/y' } }), ['/x/y']);
   assert.deepStrictEqual(sources.workspaceFolders(undefined), []);
+});
+
+// A Cursor DB with one chat in `ws`, its messages as agentKv blobs.
+function chatDb(ws) {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
+  const put = (k, v) => db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(k, v);
+  const save = (id, lastUpdatedAt, messages) => {
+    const state = Buffer.concat(messages.flatMap((m) => {
+      const raw = Buffer.from(JSON.stringify(m));
+      const hash = crypto.createHash('sha256').update(raw).digest();
+      put(`agentKv:blob:${hash.toString('hex')}`, raw);
+      return [Buffer.from([0x0a, 0x20]), hash];
+    }));
+    put(`composerData:${id}`, JSON.stringify({ name: `Chat ${id}`, lastUpdatedAt, conversationState: `~${state.toString('base64')}`, workspaceIdentifier: { uri: { fsPath: ws } } }));
+  };
+  return { db, put, save };
+}
+
+const hashOf = (m) => crypto.createHash('sha256').update(JSON.stringify(m)).digest('hex');
+
+test('the recorder keeps the context sent with each new user message, once, and links it from chat.md', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const dir = path.join(root, 'history');
+  const { db, put, save } = chatDb(ws);
+  const sys = { role: 'system', content: 'You are an agent.' };
+  const q1 = { role: 'user', content: '<user_query>\nfirst\n</user_query>' };
+  const a1 = { role: 'assistant', content: [{ type: 'text', text: 'one' }] };
+  const summary = { role: 'user', content: '<summary>\nearlier\n</summary>' };
+  const q2 = { role: 'user', content: '<user_query>\nsecond\n</user_query>' };
+  const now = Date.now();
+  const options = { sentContext: { enabled: true, appDir: APP, home, now } };
+
+  save('c1', now - 1000, [sys, q1, a1]);
+  history.recordChat(db, 'c1', dir, undefined, options);
+  // A Cursor copy of a part under its id counts as kept by Cursor.
+  const subagentsId = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'meta.json'), 'utf8')).sentContext[0].parts.subagents.id;
+  put(`agentKv:blob:${subagentsId}`, fs.readFileSync(path.join(dir, 'context', `${subagentsId}.bin`)));
+  save('c1', now, [sys, summary, q2]);
+  history.recordChat(db, 'c1', dir, undefined, options);
+  // Chats last updated long ago get nothing: the files may have changed since.
+  save('old', now - 3600e3, [sys, q1]);
+  history.recordChat(db, 'old', dir, undefined, options);
+
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.sentContext.map((e) => e.messages), [[hashOf(q1)], [hashOf(q2)]], 'user turns only, not the summary');
+  const [first, second] = meta.sentContext;
+  assert.deepStrictEqual(Object.keys(first.parts), rc.PARTS);
+  assert.deepStrictEqual(second.parts, first.parts, 'unchanged files: the same parts');
+  assert.deepStrictEqual([first.storedByCursor, second.storedByCursor], [[], ['subagents']]);
+  assert.strictEqual(first.parts.rules.items, 6);
+  // Stored once, by sha256, with a readable copy.
+  const files = fs.readdirSync(path.join(dir, 'context')).sort();
+  assert.deepStrictEqual(files, rc.PARTS.flatMap((k) => [`${first.parts[k].id}.bin`, `${first.parts[k].id}.md`]).sort());
+  for (const k of rc.PARTS) {
+    const data = fs.readFileSync(path.join(dir, 'context', `${first.parts[k].id}.bin`));
+    assert.strictEqual(crypto.createHash('sha256').update(data).digest('hex'), first.parts[k].id);
+  }
+  const rulesMd = fs.readFileSync(path.join(dir, 'context', `${first.parts.rules.id}.md`), 'utf8');
+  assert.match(rulesMd, /<details><summary><code>[^<]*always\.mdc<\/code> — global<\/summary>/);
+  assert.match(rulesMd, /Always do this\./);
+  const snap = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'snapshots', `${now}.json`), 'utf8'));
+  assert.deepStrictEqual(snap.sentContext.messages, [hashOf(q2)]);
+
+  const md = fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'chat.md'), 'utf8');
+  const sections = md.split('<details><summary>Context sent with this message (not in the prompt)</summary>');
+  assert.strictEqual(sections.length, 3, 'one collapsed section per user message');
+  assert.ok(md.indexOf('first') < md.indexOf(sections[1].slice(0, 40)));
+  assert.ok(md.includes(`](../../context/${first.parts.rules.id}.md): 6 items`));
+  assert.match(md, /Subagent definitions\]\([^)]*\): 1 items, \d+ bytes, `[0-9a-f]{12}` — Cursor kept a copy with this id/);
+  assert.ok(!fs.existsSync(path.join(dir, 'chats', 'Chat old', 'meta.json')) || !JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat old', 'meta.json'), 'utf8')).sentContext);
+
+  // The inspector panel shows the latest one as a category of its own, not counted in the usage.
+  const category = require('../src/sentContext.cjs').panelCategory(dir, meta);
+  assert.deepStrictEqual([category.estimatedTokens, category.items.map((i) => i.label)], [0, ['Rules (6)', 'Agent skills (3)', 'Subagent definitions (1)', 'MCP tools and instructions (2)']]);
+  assert.match(category.items[0].text, /Always do this\./);
+
+  // Without the option, nothing is rebuilt.
+  const plain = path.join(root, 'plain');
+  history.recordChat(db, 'c1', plain);
+  assert.ok(!fs.existsSync(path.join(plain, 'context')));
+});
+
+test('plugin database ids are taken from a part Cursor kept', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const rev = 'a'.repeat(40);
+  const plugin = path.join(home, '.cursor', 'plugins', 'cache', 'market', 'tool', rev);
+  write(path.join(plugin, '.cache-complete'), '');
+  write(path.join(plugin, '.cursor-plugin', 'plugin.json'), JSON.stringify({ name: 'tool', skills: './skills/' }));
+  write(path.join(plugin, 'skills', 'use-tool', 'SKILL.md'), '---\nname: use-tool\ndescription: Uses the tool.\n---\nx\n');
+  write(path.join(plugin, 'skills', 'v1', 'use-tool', 'SKILL.md'), '---\ndescription: An older copy, not listed.\n---\nx\n');
+  const { db, put, save } = chatDb(ws);
+  const kept = rc.encode(rc.PART_TYPES.skills, { agent_skills: [{ full_path: '/x', description: 'd', git_remote_origin: `plugin:tool-${rev}`, plugin: 'tool', marketplace: 'market', plugin_id: '7', marketplace_id: '3' }] });
+  put(`agentKv:blob:${rc.sha256(kept)}`, kept);
+  save('c', Date.now(), [{ role: 'user', content: 'plain question' }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const skills = rc.decodePart('skills', fs.readFileSync(path.join(dir, 'context', `${entry.parts.skills.id}.bin`))).agent_skills.filter((s) => s.plugin);
+  assert.deepStrictEqual(skills.map((s) => [path.relative(plugin, s.full_path), s.plugin_id, s.marketplace_id, s.git_remote_origin]), [[path.join('skills', 'use-tool', 'SKILL.md'), '7', '3', `plugin:tool-${rev}`]]);
+  assert.ok(!(entry.notes || []).some((n) => /plugin database ids/.test(n)));
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'context', 'plugin-ids.json'), 'utf8'))[`tool-${rev}`].pluginId, '7');
 });

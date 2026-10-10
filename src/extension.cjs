@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const vscode = require('vscode');
 const store = require('./cursorStore.cjs');
 const history = require('./history.cjs');
+const sentContext = require('./sentContext.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
 
@@ -33,6 +34,24 @@ function historyDir() {
   return settings().get('historyDirectory') || history.defaultHistoryDir();
 }
 
+// A chat's recorded meta.json, found through the history's index; undefined if not recorded.
+function readMeta(composerId) {
+  try {
+    const find = (list) => {
+      for (const c of list) {
+        if (c.composerId === composerId) return c;
+        const sub = find(c.subagents || []);
+        if (sub) return sub;
+      }
+      return undefined;
+    };
+    const entry = find(JSON.parse(fs.readFileSync(path.join(historyDir(), 'index.json'), 'utf8')));
+    return entry && JSON.parse(fs.readFileSync(path.join(historyDir(), entry.path, 'meta.json'), 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
 // Snapshot changed chats every 30 s; one window records, the others skip.
 // Older chats are caught up in small batches, every 5 s until done.
 function startRecorder(context) {
@@ -49,7 +68,11 @@ function startRecorder(context) {
       if (stat.mtimeMs !== lastWrite || backfilling) {
         lastWrite = stat.mtimeMs;
         db = db || store.openDatabase(dbPath);
-        backfilling = !!history.tick(db, historyDir(), { backfillDays: settings().get('historyBackfillDays') }).backfilling;
+        backfilling = !!history.tick(db, historyDir(), {
+          backfillDays: settings().get('historyBackfillDays'),
+          // Rebuilt with Cursor's own ripgrep and gray-matter.
+          sentContext: { enabled: true, appDir: vscode.env.appRoot },
+        }).backfilling;
       }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);
@@ -256,6 +279,8 @@ class Inspector {
       }
       if (!this.chatId) return this.post({ type: 'error', message: 'No Cursor agent chats with context data were found.' });
       const ctx = store.loadContext(db, this.chatId);
+      const sent = sentContext.panelCategory(historyDir(), readMeta(this.chatId));
+      if (sent) ctx.categories.push(sent);
       this.loadedAt = ctx.lastUpdatedAt;
       this.index(ctx);
       this.post({ type: 'context', chats, follow: this.follow, context: { ...skeleton(ctx), ancestors: store.ancestors(db, this.chatId) } });

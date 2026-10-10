@@ -23,8 +23,9 @@ const CATEGORY_ORDER = [
 ];
 
 const TOOLS_UNAVAILABLE =
-  'Tool definitions are attached by Cursor\'s backend and are not stored on this machine. ' +
-  'Only the tool name and Cursor\'s token estimate are recorded locally.';
+  'Cursor\'s built-in tool definitions are attached by its backend and are not stored on this machine: ' +
+  'only the tool name and Cursor\'s token estimate are known locally. MCP tool definitions are sent by ' +
+  'the client; the history records them under "Sent with the request, not in the prompt".';
 
 function defaultDatabasePath() {
   const home = os.homedir();

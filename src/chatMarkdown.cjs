@@ -3,7 +3,9 @@
 // A recorded chat as a readable conversation (chat.md): what the user asked, what
 // the agent said and did. The system prompt and the context Cursor injects into
 // user messages (rules, skills, open files, reminders) are left out; transcript.md
-// keeps them, raw.
+// keeps them, raw. The context sent beside the prompt is linked, collapsed.
+
+const { chatSection } = require('./sentContext.cjs');
 
 const asText = (v) => (v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 
@@ -64,7 +66,8 @@ const seconds = (ms) => (typeof ms === 'number' ? ` · ${ms < 1000 ? '<1' : Math
 // messages: in first-seen order. subagents: [{ name, type, toolCallId, folder }].
 // thinking: aligned with messages, the readable thinking Cursor kept for each (history.cjs
 // thinking.json): [{ text, durationMs, part, unplaced }], part the index of its reasoning part.
-function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [] } = {}) {
+// sentContext: per message, the context recorded as sent with it (files under contextDir).
+function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [], sentContext = [], contextDir = 'context' } = {}) {
   const results = new Map();
   for (const m of messages) {
     if (m.role === 'tool') for (const p of parts(m)) if (p.toolCallId) results.set(p.toolCallId, p);
@@ -98,6 +101,7 @@ function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [] } 
         else say(parent && b.label === 'User' ? 'Task' : b.label, b.text);
       }
       for (const p of parts(m)) if (p.type === 'image') say('User', '_[image]_');
+      if (sentContext[mi]) say('User', chatSection(sentContext[mi], contextDir));
     } else if (m.role === 'assistant') {
       for (const t of loose.filter((x) => !x.unplaced)) say(agent, details(`Thinking${seconds(t.durationMs)}`, t.text.trim()));
       parts(m).forEach((p, pi) => {

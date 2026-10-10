@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const history = require('../src/history.cjs');
+const pb = require('./protoEncode.cjs');
 
 function setup() {
   const db = new DatabaseSync(':memory:');
@@ -19,10 +20,17 @@ function setup() {
     put(`agentKv:blob:${hash.toString('hex')}`, raw);
     return hash;
   };
-  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0, ...extra } = {}) => {
+  const raw = (data) => {
+    const hash = crypto.createHash('sha256').update(data).digest();
+    put(`agentKv:blob:${hash.toString('hex')}`, data);
+    return hash;
+  };
+  // turns: each a list of ConversationStep bytes (see step below), stored as Cursor does.
+  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0, turns = [], ...extra } = {}) => {
     // self_summary_count is field 17, varint: tag 0x88 0x01.
     const count = summaries ? [Buffer.from([0x88, 0x01, summaries])] : [];
-    const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count]);
+    const turnIds = turns.map((steps) => raw(pb.len(1, Buffer.concat(steps.map((st) => pb.len(2, raw(st)))))));
+    const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count, ...turnIds.map((t) => pb.len(8, t))]);
     put(`composerData:${id}`, JSON.stringify({
       name, lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
       promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] }, ...extra,
@@ -31,6 +39,13 @@ function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-history-'));
   return { db, save, dir };
 }
+
+// ConversationStep: 1 assistant_message { 1 text }, 2 tool_call, 3 thinking_message { 1 text, 2 duration_ms }.
+const step = {
+  thinking: (text, ms) => pb.len(3, Buffer.concat([pb.len(1, text), ...(ms ? [pb.v(2, ms)] : [])])),
+  text: (text) => pb.len(1, pb.len(1, text)),
+  tool: (args) => pb.len(2, pb.len(8, pb.len(1, Buffer.concat(Object.values(args).map((v, i) => pb.len(i + 1, v)))))),
+};
 
 const sys = { role: 'system', content: 'You are an agent.' };
 const first = { role: 'user', content: 'first question' };
@@ -424,4 +439,56 @@ test('a state recorded under a send time is not overwritten when the run is summ
   const states = fs.readdirSync(chat).map((f) => JSON.parse(fs.readFileSync(path.join(chat, f), 'utf8')).messages.join());
   assert.strictEqual(states.length, 7, '3 + 1 derived states and 3 updates');
   assert.strictEqual(new Set(states).size, 7, 'every state kept');
+});
+
+test('the readable thinking from Cursor\'s turn steps is recorded and shown where the model thought it', () => {
+  const { db, save, dir } = setup();
+  const user = { role: 'user', content: [{ type: 'text', text: '<user_query>\nfix the bug\n</user_query>' }] };
+  const read = { role: 'assistant', content: [
+    { type: 'redacted-reasoning', data: Buffer.from('ciphertext').toString('base64') },
+    { type: 'text', text: 'Reading it.' },
+    { type: 'tool-call', toolCallId: 't1', toolName: 'Read', args: { path: '/a.js' } },
+  ] };
+  const result = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'Read', result: 'const a = 1;' }] };
+  const done = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Fixed.' }] };
+  const later = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAAAAAA' }] };
+  save(1000, [sys, user, read, result, done, later], { turns: [[
+    step.thinking('The bug is in a.js.', 2100), step.text('Reading it.'), step.tool({ path: '/a.js' }),
+    step.thinking('One line fixes it.'), step.text('Fixed.'),
+  ]] });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const thinking = JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'));
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(thinking.map((e) => [e.text, e.durationMs, meta.seen.indexOf(e.message), e.part]), [
+    ['The bug is in a.js.', 2100, 2, 0],
+    ['One line fixes it.', undefined, 4, 0],
+  ]);
+
+  const md = fs.readFileSync(path.join(chat, 'chat.md'), 'utf8');
+  const first = md.indexOf('<summary>Thinking · 2 s <i>(sent to the model encrypted, 10 bytes)</i></summary>\n\nThe bug is in a.js.');
+  assert.ok(first !== -1, 'readable thinking on the encrypted part, with its size');
+  assert.ok(first < md.indexOf('Reading it.') && md.indexOf('Reading it.') < md.indexOf('One line fixes it.') && md.indexOf('One line fixes it.') < md.indexOf('Fixed.'), 'in order');
+  assert.match(md, /<summary>Thinking <i>\(encrypted, 6 bytes\)<\/i><\/summary>\n\n_Encrypted by the model's provider/, 'encrypted thinking without a readable copy is labelled');
+  const transcript = fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8');
+  assert.match(transcript, /## #2 assistant\n[\s\S]*> Readable thinking \(content\[0\]\), from Cursor's turn step [0-9a-f]{12}:\n>\n> The bug is in a.js.\n/);
+
+  // Cursor stops listing the turn: the thinking stays recorded.
+  save(2000, [sys, user, read, result, done, later]);
+  history.recordUpdatedSince(db, dir, 1000);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8')).length, 2);
+  assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /One line fixes it\./);
+});
+
+test('chats recorded before thinking was kept get it', () => {
+  const { db, save, dir } = setup();
+  const answer = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Hello.' }] };
+  save(1000, [sys, first, answer], { turns: [[step.thinking('Say hello.'), step.text('Hello.')]] });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  fs.rmSync(path.join(chat, 'thinking.json'));
+  fs.writeFileSync(path.join(chat, 'chat.md'), 'old');
+  history.tick(db, dir);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'))[0].text, 'Say hello.');
+  assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /<\/i><\/summary>\n\nSay hello\./);
 });

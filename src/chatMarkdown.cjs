@@ -56,9 +56,15 @@ function userBlocks(message) {
   return blocks;
 }
 
+// Thinking the model's provider returned encrypted (redacted-reasoning): its size, decoded.
+const encryptedBytes = (p) => Buffer.from(String(p.data || ''), 'base64').length;
+const seconds = (ms) => (typeof ms === 'number' ? ` · ${ms < 1000 ? '<1' : Math.round(ms / 1000)} s` : '');
+
 // meta: { name, composerId, model, workspace, createdAt, lastUpdatedAt }.
 // messages: in first-seen order. subagents: [{ name, type, toolCallId, folder }].
-function chatMarkdown(meta, messages, { subagents = [], parent } = {}) {
+// thinking: aligned with messages, the readable thinking Cursor kept for each (history.cjs
+// thinking.json): [{ text, durationMs, part, unplaced }], part the index of its reasoning part.
+function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [] } = {}) {
   const results = new Map();
   for (const m of messages) {
     if (m.role === 'tool') for (const p of parts(m)) if (p.toolCallId) results.set(p.toolCallId, p);
@@ -79,7 +85,10 @@ function chatMarkdown(meta, messages, { subagents = [], parent } = {}) {
     out.push(block, '');
   };
   const agent = `Agent${meta.model ? ` (${meta.model})` : ''}`;
-  for (const m of messages) {
+  messages.forEach((m, mi) => {
+    const thoughts = thinking[mi] || [];
+    const onPart = new Map(thoughts.filter((t) => t.part !== null && t.part !== undefined).map((t) => [t.part, t]));
+    const loose = thoughts.filter((t) => !onPart.has(t.part));
     if (m.role === 'user') {
       const blocks = userBlocks(m);
       for (const b of blocks) {
@@ -90,11 +99,19 @@ function chatMarkdown(meta, messages, { subagents = [], parent } = {}) {
       }
       for (const p of parts(m)) if (p.type === 'image') say('User', '_[image]_');
     } else if (m.role === 'assistant') {
-      for (const p of parts(m)) {
+      for (const t of loose.filter((x) => !x.unplaced)) say(agent, details(`Thinking${seconds(t.durationMs)}`, t.text.trim()));
+      parts(m).forEach((p, pi) => {
         const text = asText(p.text).trim();
+        const t = onPart.get(pi);
         if (p.type === 'text' && text) say(agent, text);
-        else if (p.type === 'reasoning' && text) say(agent, details('Thinking', text));
-        else if (p.type === 'tool-call') {
+        else if (p.type === 'reasoning' && (text || t)) say(agent, details(`Thinking${seconds(t && t.durationMs)}`, text || t.text.trim()));
+        else if (p.type === 'redacted-reasoning') {
+          // The model got this thinking encrypted; Cursor's turn step keeps what it showed as readable text.
+          const size = `${encryptedBytes(p)} bytes`;
+          say(agent, t
+            ? details(`Thinking${seconds(t.durationMs)} <i>(sent to the model encrypted, ${size})</i>`, t.text.trim())
+            : details(`Thinking <i>(encrypted, ${size})</i>`, '_Encrypted by the model\'s provider and passed back to it unread; Cursor kept no readable copy._'));
+        } else if (p.type === 'tool-call') {
           const hint = toolHint(p.args);
           const result = results.get(p.toolCallId);
           const body = [`**Input**\n\n${fenced(asText(p.args), 'json')}`];
@@ -102,9 +119,10 @@ function chatMarkdown(meta, messages, { subagents = [], parent } = {}) {
           say(agent, details(`Tool: <b>${html(p.toolName)}</b>${hint ? ` — ${html(hint)}` : ''}`, body.join('\n\n')));
           for (const s of spawned(p.toolCallId)) say(agent, `↳ Subagent: ${subLink(s)}${s.type ? ` (${s.type})` : ''}`);
         }
-      }
+      });
     }
-  }
+    for (const t of loose.filter((x) => x.unplaced)) say(agent, details(`Thinking${seconds(t.durationMs)} <i>(its message is not in the record)</i>`, t.text.trim()));
+  });
   return `${out.join('\n').trimEnd()}\n`;
 }
 

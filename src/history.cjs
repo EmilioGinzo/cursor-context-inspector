@@ -15,6 +15,7 @@
 //   snapshots/<lastUpdatedAt>-<n>.json  the first n of them: a model call's prompt, or a turn's end, before that update
 //   latest.json                    newest snapshot plus Cursor's usage tree
 //   chat.md                        the conversation, readable: user, agent, thinking, tool calls
+//   thinking.json                  the agent's readable thinking from Cursor's turn steps, placed on prompt messages
 //   transcript.md                  every message ever seen, raw text, in order; links subagents
 //   subagents/<subagent name>/     a <chat> for each subagent it spawned (nested to any depth)
 //
@@ -24,6 +25,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const store = require('./cursorStore.cjs');
+const turnSteps = require('./turnSteps.cjs');
 const { chatMarkdown } = require('./chatMarkdown.cjs');
 
 function defaultHistoryDir() {
@@ -221,6 +223,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
     snapshots: (meta.snapshots || 0) + 1 + earlier.length,
   });
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+  recordThinking(db, dir, chatDir, meta, composer.conversationState);
   writeTranscript(db, dir, chatDir, meta, hashes);
   return recorded + 1;
 }
@@ -246,13 +249,41 @@ function earlierStates(dir, hashes, summaries, previous) {
   return states;
 }
 
+// The prompt holds the model's thinking only encrypted; Cursor keeps the readable text as turn
+// steps (see turnSteps.cjs). Each entry: { step, turn, text, durationMs, message, part }. Thinking
+// of turns Cursor no longer lists stays as recorded.
+function recordThinking(db, dir, chatDir, meta, conversationState) {
+  const file = path.join(chatDir, 'thinking.json');
+  const messages = meta.seen.map((hash) => ({ hash, message: readJson(path.join(dir, 'blobs', `${hash}.json`), undefined) }));
+  const current = turnSteps.placeThinking(turnSteps.loadTurns(db, conversationState), messages);
+  const fresh = new Map(current.map((e) => [e.step, e]));
+  const kept = readJson(file, []).map((e) => fresh.get(e.step) || e);
+  const known = new Set(kept.map((e) => e.step));
+  writeAtomic(file, JSON.stringify([...kept, ...current.filter((e) => !known.has(e.step))], null, 2));
+}
+
 function writeTranscript(db, dir, chatDir, meta, currentHashes) {
   const folders = new Map([...folderOwners(path.join(chatDir, 'subagents'))].map(([entry, id]) => [id, entry]));
   const subagents = store.loadSubagents(db, meta.subagentIds || []).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
-  writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent));
-  const messages = meta.seen.map((hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined)).filter(Boolean);
-  writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, messages, { subagents, parent }));
+  const thinking = readJson(path.join(chatDir, 'thinking.json'), []);
+  writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
+  const recorded = meta.seen.map((hash) => ({ hash, message: readJson(path.join(dir, 'blobs', `${hash}.json`), undefined) })).filter((m) => m.message);
+  writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, recorded.map((m) => m.message), { subagents, parent, thinking: thinkingByMessage(thinking, recorded.map((m) => m.hash)) }));
+}
+
+// Thinking per message (aligned with `hashes`): placed thinking on its message; thinking whose
+// message is not in the record after the message the previous thinking was on (else the last).
+function thinkingByMessage(thinking, hashes) {
+  const out = hashes.map(() => []);
+  const at = new Map(hashes.map((h, i) => [h, i]));
+  let last = hashes.length - 1;
+  for (const e of thinking) {
+    const i = at.get(e.message);
+    if (i !== undefined) out[(last = i)].push(e);
+    else if (last >= 0) out[last].push({ ...e, part: null, unplaced: true });
+  }
+  return out;
 }
 
 // Re-render every recorded transcript (after a layout change), refreshing
@@ -271,6 +302,7 @@ function rebuildTranscripts(db, dir) {
       }
       writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       for (const id of meta.subagentIds || []) recordChat(db, id, dir);
+      if (row) recordThinking(db, dir, chatDir, meta, composer.conversationState);
       const latest = readJson(path.join(chatDir, 'latest.json'), { messages: meta.seen });
       writeTranscript(db, dir, chatDir, meta, latest.messages);
     }
@@ -288,7 +320,7 @@ const subLink = (s) => {
   return `${link}${s.type ? ` (${s.type})` : ''}`;
 };
 
-function transcript(dir, meta, current, subagents = [], parent) {
+function transcript(dir, meta, current, subagents = [], parent, thinking = []) {
   const head = [
     `# ${meta.name}`,
     '',
@@ -307,11 +339,16 @@ function transcript(dir, meta, current, subagents = [], parent) {
     const ids = Array.isArray(message.content) ? message.content.map((p) => p.toolCallId).filter(Boolean) : [];
     return subagents.filter((s) => s.toolCallId && ids.some((id) => id.includes(s.toolCallId) || s.toolCallId.includes(id)));
   };
+  // The readable thinking Cursor kept for a message, quoted after it: it is not prompt text.
+  const thoughts = (hash) => thinking.filter((e) => e.message === hash).map((e) => {
+    const where = e.part === null ? '' : ` (content[${e.part}])`;
+    return `\n> Readable thinking${where}, from Cursor's turn step ${e.step.slice(0, 12)}:\n>\n> ${e.text.replace(/\n/g, '\n> ')}\n`;
+  }).join('');
   const body = meta.seen.map((hash, i) => {
     const message = readJson(path.join(dir, 'blobs', `${hash}.json`), { role: 'missing', content: `(blob ${hash} not recorded)` });
     const status = current.has(hash) ? '' : ' (no longer in prompt)';
     const links = message.role === 'assistant' ? spawnedBy(message).map((s) => `\n> ↳ Subagent: ${subLink(s)}\n`).join('') : '';
-    return `## #${i} ${message.role}${status}\n\n${store.messageText(message)}\n${links}`;
+    return `## #${i} ${message.role}${status}\n\n${store.messageText(message)}\n${thoughts(hash)}${links}`;
   });
   return `${head.join('\n')}\n${body.join('\n')}`;
 }
@@ -334,9 +371,14 @@ function migrateLayout(db, dir) {
     if (fs.existsSync(from) && target !== from) mergeInto(from, target);
     const subDir = path.join(target, 'subagents');
     for (const [entry, subId] of [...folderOwners(subDir)]) walk(path.join(subDir, entry), subId);
-    // Chats recorded before 0.10 have no chat.md yet.
+    // Chats recorded before 0.10 have no chat.md yet; before thinking was kept, no thinking.json.
     const meta = readJson(path.join(target, 'meta.json'), {});
-    if (meta.seen && !fs.existsSync(path.join(target, 'chat.md'))) {
+    const noThinking = meta.seen && !fs.existsSync(path.join(target, 'thinking.json'));
+    if (noThinking) {
+      const row = store.getValue(db, `composerData:${id}`);
+      recordThinking(db, dir, target, meta, row ? JSON.parse(row).conversationState : undefined);
+    }
+    if (meta.seen && (noThinking || !fs.existsSync(path.join(target, 'chat.md')))) {
       writeTranscript(db, dir, target, meta, readJson(path.join(target, 'latest.json'), { messages: meta.seen }).messages);
     }
     checkedFolders.add(target);

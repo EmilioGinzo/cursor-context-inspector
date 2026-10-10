@@ -123,6 +123,35 @@ function rootMessageHashes(conversationState) {
   return hashes;
 }
 
+// How often the chat was summarized: self_summary_count (field 17), at least 1
+// when the state holds a summary (field 6). 0 for a chat never summarized.
+function summaryCount(conversationState) {
+  if (typeof conversationState !== 'string' || !conversationState.startsWith('~')) return 0;
+  const buf = Buffer.from(conversationState.slice(1), 'base64');
+  let count = 0;
+  let summary = false;
+  let pos = 0;
+  while (pos < buf.length) {
+    let tag;
+    [tag, pos] = readVarint(buf, pos);
+    const field = Math.floor(tag / 8);
+    const wire = tag & 7;
+    if (wire === 0) {
+      let v;
+      [v, pos] = readVarint(buf, pos);
+      if (field === 17) count = v;
+    } else if (wire === 1) pos += 8;
+    else if (wire === 5) pos += 4;
+    else if (wire === 2) {
+      let len;
+      [len, pos] = readVarint(buf, pos);
+      if (field === 6) summary = true;
+      pos += len;
+    } else break;
+  }
+  return Math.max(count, summary ? 1 : 0);
+}
+
 function loadMessages(db, conversationState) {
   return rootMessageHashes(conversationState).map((hash) => {
     const raw = getValue(db, `agentKv:blob:${hash}`);
@@ -553,5 +582,6 @@ module.exports = {
   lastUpdatedAt,
   loadContext,
   rootMessageHashes,
+  summaryCount,
   topLevelBlocks,
 };

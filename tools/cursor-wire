@@ -164,8 +164,19 @@ cmd_launch() {
   fi
   [ -f "$CA" ] || die "no mitmproxy CA at $CA; run: cursor-wire ca install"
   local proxy=http://127.0.0.1:$p
+  # Cursor's MCP process (remote MCP servers, e.g. Atlassian's) ignores NODE_EXTRA_CA_CERTS: it
+  # trusts what Cursor's main process loads, which includes Node's system store, and that follows
+  # SSL_CERT_FILE. So it points at the system bundle plus mitmproxy's CA; OpenSSL tools the agent
+  # runs (curl, git) then trust the proxy too.
+  local base="" f bundle=$WIRE_DIR/ca-bundle.pem
+  for f in "${SSL_CERT_FILE:-}" /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
+    if [ -n "$f" ] && [ -f "$f" ] && [ "$f" != "$bundle" ]; then base=$f; break; fi
+  done
+  [ -n "$base" ] || die "no system CA bundle found; set SSL_CERT_FILE to one"
+  mkdir -p "$WIRE_DIR"
+  { cat "$base"; echo; cat "$CA"; } >"$bundle.tmp" && mv "$bundle.tmp" "$bundle"
   # Chromium follows --proxy-server; Cursor's Node children, such as the agent worker, only these.
-  local env=(NODE_EXTRA_CA_CERTS="$CA" NODE_USE_ENV_PROXY=1
+  local env=(NODE_EXTRA_CA_CERTS="$CA" NODE_USE_ENV_PROXY=1 SSL_CERT_FILE="$bundle"
     HTTPS_PROXY="$proxy" https_proxy="$proxy" HTTP_PROXY="$proxy" http_proxy="$proxy"
     NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1)
   local cmd=("$CURSOR" --password-store=gnome-libsecret --proxy-server="$proxy")

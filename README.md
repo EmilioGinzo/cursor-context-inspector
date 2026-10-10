@@ -308,7 +308,14 @@ do not. So `launch` also sets `HTTPS_PROXY`/`HTTP_PROXY` (and lowercase),
 `NODE_USE_ENV_PROXY=1` (Node 24+'s built-in support for those variables) and
 `NO_PROXY=localhost,127.0.0.1,::1` for Cursor and everything it starts. The
 worker runs with `--use-system-ca`, so Node reads the system store too, and
-`NODE_EXTRA_CA_CERTS` adds mitmproxy's CA. Whether the worker's bundled
+`NODE_EXTRA_CA_CERTS` adds mitmproxy's CA. Cursor's MCP process, which talks to
+remote MCP servers such as Atlassian's, ignores `NODE_EXTRA_CA_CERTS` and
+trusts only the certificates Cursor's main process loads. Without the CA there,
+every remote MCP server fails with `fetch failed` and its sign-in never starts.
+So `launch` also writes `~/.cursor-wire/ca-bundle.pem` (the system bundle plus
+mitmproxy's CA) and points `SSL_CERT_FILE` at it, which Node's system store
+follows. Tools the agent runs, such as curl and git, then trust the proxy too.
+Whether the worker's bundled
 runtime honours `NODE_USE_ENV_PROXY` is still unverified: after launching, run
 `tools/cursor-wire check`. It lists Cursor's processes by pid and executable
 name only (their command lines hold API keys), and fails if any of them has a

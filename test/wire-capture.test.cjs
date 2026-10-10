@@ -241,7 +241,7 @@ test('cursor-wire launch only uses the proxy start recorded, or an explicit one 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-wire-test-'));
   const fakeCursor = path.join(home, 'fake-cursor'); // prints what Cursor would get
   fs.writeFileSync(fakeCursor, '#!/bin/sh\necho "proxy=$HTTPS_PROXY,$http_proxy env_proxy=$NODE_USE_ENV_PROXY ' +
-    'no_proxy=$NO_PROXY ca=$NODE_EXTRA_CA_CERTS" "$@"\n', { mode: 0o755 });
+    'no_proxy=$NO_PROXY ca=$NODE_EXTRA_CA_CERTS ssl=$SSL_CERT_FILE" "$@"\n', { mode: 0o755 });
   const env = {
     ...process.env, HOME: home, CURSOR_WIRE_DIR: path.join(home, 'wire'), CURSOR_BIN: fakeCursor,
     PATH: `${path.dirname(mitmdump)}${path.delimiter}${process.env.PATH}`,
@@ -277,6 +277,13 @@ test('cursor-wire launch only uses the proxy start recorded, or an explicit one 
   // Cursor's Node children (the agent worker) ignore --proxy-server and need the environment.
   assert.ok(r.out.includes(`proxy=${proxy},${proxy} env_proxy=1 no_proxy=localhost,127.0.0.1,::1 ` +
     `ca=${path.join(home, '.mitmproxy', 'mitmproxy-ca-cert.pem')}`), r.out);
+  // Cursor's MCP process ignores NODE_EXTRA_CA_CERTS; it trusts the system store, which follows SSL_CERT_FILE.
+  const bundle = path.join(home, 'wire', 'ca-bundle.pem');
+  assert.ok(r.out.includes(`ssl=${bundle} `), r.out);
+  const pem = fs.readFileSync(bundle, 'utf8');
+  const mitmCa = fs.readFileSync(path.join(home, '.mitmproxy', 'mitmproxy-ca-cert.pem'), 'utf8').trim();
+  assert.ok(pem.trim().endsWith(mitmCa), 'the bundle ends with mitmproxy\'s CA');
+  assert.ok(pem.split('BEGIN CERTIFICATE').length > 2, 'the bundle keeps the system certificates');
   r = run('env');
   for (const v of [`HTTPS_PROXY=${proxy}`, 'NODE_USE_ENV_PROXY=1', `--proxy-server=${proxy}`]) assert.ok(r.out.includes(v), r.out);
 

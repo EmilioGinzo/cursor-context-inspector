@@ -285,7 +285,7 @@ test('a chat ticked before its run stored any state is recorded when the run end
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [0, 1], 'nothing to record yet, kept for later');
   save(1000, [sys, first, answer], { status: 'completed', conversationCheckpointLastUpdatedAt: 1013 });
   assert.strictEqual(history.tick(db, dir).recorded, 1);
-  assert.deepStrictEqual(snapshots(dir), ['1013.json']);
+  assert.deepStrictEqual(snapshots(dir), ['1000-2.json', '1013.json'], 'with the prompt that wrote the answer');
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8')).seen.length, 3);
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [0, 0], 'settled: no longer re-checked');
 });
@@ -321,7 +321,7 @@ test('a history recorded before the fix is rescanned for chats it missed, withou
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3, backfill: { done: true } }));
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).recorded], [1, 0]);
   assert.deepStrictEqual(snapshots(dir, 'Kept chat'), ['1000.json']);
-  assert.deepStrictEqual(snapshots(dir, 'Missed chat'), ['2013.json']);
+  assert.deepStrictEqual(snapshots(dir, 'Missed chat'), ['2000-2.json', '2013.json']);
 });
 
 test('a chat stuck unsettled is given up after a day', () => {
@@ -390,4 +390,20 @@ test('chats recorded before chat.md existed get one', () => {
   const md = fs.readFileSync(file, 'utf8');
   assert.match(md, /_\*\*User\*\*_\n\nhi\n/);
   assert.match(md, /<summary>Summarized by Cursor<\/summary>\n\nearlier we talked/);
+});
+
+test('a message Cursor writes after its chat is recorded reaches the record', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  save(1000, [sys, first, answer], { status: 'completed' });
+  // The prompt already lists the answer, but its blob is not in the DB yet.
+  const late = crypto.createHash('sha256').update(JSON.stringify(answer)).digest('hex');
+  db.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`agentKv:blob:${late}`);
+  history.tick(db, dir);
+  assert.strictEqual(history.tick(db, dir).pending, 1, 'kept until the message is written');
+  save(1000, [sys, first, answer], { status: 'completed' });
+  history.tick(db, dir);
+  assert.ok(fs.existsSync(path.join(dir, 'blobs', `${late}.json`)));
+  assert.match(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8'), /first answer/);
+  assert.strictEqual(history.tick(db, dir).pending, 0, 'settled once the message is recorded');
 });

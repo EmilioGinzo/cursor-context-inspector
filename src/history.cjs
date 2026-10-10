@@ -151,21 +151,29 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   const chatDir = chatDirFor(db, dir, composerId, composer.name || 'Untitled chat');
   const breakdown = composer.promptTokenBreakdown || {};
   const totalUsedTokens = breakdown.totalUsedTokens ?? composer.contextTokensUsed;
-  // Unchanged since the last snapshot. Mid-run the messages change while lastUpdatedAt
-  // stays at the send time, so the messages are compared, not only the time.
-  const latest = readJson(path.join(chatDir, 'latest.json'), undefined);
-  if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
-    && (latest.messages || []).join() === hashes.join()) return recorded;
-  // Never overwrite a snapshot: two states may share a timestamp.
-  let snapshotFile = path.join(chatDir, 'snapshots', `${changedAt(composer)}.json`);
-  if (fs.existsSync(snapshotFile)) snapshotFile = snapshotFile.replace(/\.json$/, `-${Date.now()}.json`);
-
+  // Before the check below: Cursor may write a message after the prompt that lists it.
+  let fetched = 0;
   for (const hash of hashes) {
     const blobFile = path.join(dir, 'blobs', `${hash}.json`);
     if (fs.existsSync(blobFile)) continue;
     const value = store.getValue(db, `agentKv:blob:${hash}`);
-    if (value !== undefined) writeAtomic(blobFile, value);
+    if (value === undefined) continue;
+    writeAtomic(blobFile, value);
+    fetched++;
   }
+  const metaFile = path.join(chatDir, 'meta.json');
+  // Unchanged since the last snapshot. Mid-run the messages change while lastUpdatedAt
+  // stays at the send time, so the messages are compared, not only the time.
+  const latest = readJson(path.join(chatDir, 'latest.json'), undefined);
+  if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
+    && (latest.messages || []).join() === hashes.join()) {
+    const meta = readJson(metaFile, {});
+    if (fetched && meta.seen) writeTranscript(db, dir, chatDir, meta, hashes);
+    return recorded;
+  }
+  // Never overwrite a snapshot: two states may share a timestamp.
+  let snapshotFile = path.join(chatDir, 'snapshots', `${changedAt(composer)}.json`);
+  if (fs.existsSync(snapshotFile)) snapshotFile = snapshotFile.replace(/\.json$/, `-${Date.now()}.json`);
 
   // The states the chat went through since the last snapshot, written before this update's
   // snapshot and latest.json, which mark the update as recorded.
@@ -191,7 +199,6 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   writeAtomic(snapshotFile, JSON.stringify(snapshot, null, 2));
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
-  const metaFile = path.join(chatDir, 'meta.json');
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...readJson(metaFile, {}) };
   const seen = new Set(meta.seen);
   for (const h of hashes) if (!seen.has(h)) meta.seen.push(h);

@@ -229,8 +229,21 @@ Each session:
 tools/cursor-wire start        # proxy on 127.0.0.1:8080 (--port N for another)
 tools/cursor-wire launch       # start Cursor through it; Cursor must not already be running
 tools/cursor-wire status
+tools/cursor-wire check        # flags Cursor processes that reach :443 directly
 tools/cursor-wire stop         # stops only the proxy this script started
 ```
+
+Chromium follows `--proxy-server`, but Cursor's Node children, among them the
+agent worker (`cursor-agent ... worker start`, which carries the agent chats),
+do not. So `launch` also sets `HTTPS_PROXY`/`HTTP_PROXY` (and lowercase),
+`NODE_USE_ENV_PROXY=1` (Node 24+'s built-in support for those variables) and
+`NO_PROXY=localhost,127.0.0.1,::1` for Cursor and everything it starts. The
+worker runs with `--use-system-ca`, so Node reads the system store too, and
+`NODE_EXTRA_CA_CERTS` adds mitmproxy's CA. Whether the worker's bundled
+runtime honours `NODE_USE_ENV_PROXY` is still unverified: after launching, run
+`tools/cursor-wire check`. It lists Cursor's processes by pid and executable
+name only (their command lines hold API keys), and fails if any of them has a
+connection to a remote port 443 that does not go through the proxy.
 
 `launch` only uses the proxy `start` recorded, or `--port N` if you started
 mitmdump yourself; either way it checks that the listener is a mitmdump running

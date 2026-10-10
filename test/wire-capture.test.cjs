@@ -239,8 +239,11 @@ test('cursor-wire launch only uses the proxy start recorded, or an explicit one 
   skip: skip || (!ss && 'ss not installed'), timeout: 60000,
 }, async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-wire-test-'));
+  const fakeCursor = path.join(home, 'fake-cursor'); // prints what Cursor would get
+  fs.writeFileSync(fakeCursor, '#!/bin/sh\necho "proxy=$HTTPS_PROXY,$http_proxy env_proxy=$NODE_USE_ENV_PROXY ' +
+    'no_proxy=$NO_PROXY ca=$NODE_EXTRA_CA_CERTS" "$@"\n', { mode: 0o755 });
   const env = {
-    ...process.env, HOME: home, CURSOR_WIRE_DIR: path.join(home, 'wire'), CURSOR_BIN: '/bin/echo',
+    ...process.env, HOME: home, CURSOR_WIRE_DIR: path.join(home, 'wire'), CURSOR_BIN: fakeCursor,
     PATH: `${path.dirname(mitmdump)}${path.delimiter}${process.env.PATH}`,
   };
   const run = (...args) => {
@@ -267,10 +270,24 @@ test('cursor-wire launch only uses the proxy start recorded, or an explicit one 
   r = run('start', '--port', String(await freePort()));
   assert.ok(!r.ok && /already running/.test(r.out), r.out);
 
+  const proxy = `http://127.0.0.1:${port}`;
   r = run('launch', '--new-window');
   assert.ok(r.ok, r.out);
-  assert.match(r.out, new RegExp(`--proxy-server=http://127\\.0\\.0\\.1:${port} --new-window`));
-  assert.match(run('env').out, new RegExp(`--proxy-server=http://127\\.0\\.0\\.1:${port}`));
+  assert.ok(r.out.includes(`--proxy-server=${proxy} --new-window`), r.out);
+  // Cursor's Node children (the agent worker) ignore --proxy-server and need the environment.
+  assert.ok(r.out.includes(`proxy=${proxy},${proxy} env_proxy=1 no_proxy=localhost,127.0.0.1,::1 ` +
+    `ca=${path.join(home, '.mitmproxy', 'mitmproxy-ca-cert.pem')}`), r.out);
+  r = run('env');
+  for (const v of [`HTTPS_PROXY=${proxy}`, 'NODE_USE_ENV_PROXY=1', `--proxy-server=${proxy}`]) assert.ok(r.out.includes(v), r.out);
+
+  // check finds an agent worker and its connection through the proxy, without printing its command line.
+  const agent = spawn(process.execPath, ['-e', `require('net').connect(${port}, '127.0.0.1'); setInterval(() => {}, 1000)`,
+    'worker', '--api-key=agent-secret'], { argv0: 'cursor-agent', stdio: 'ignore' });
+  t.after(() => agent.kill());
+  await waitFor(() => run('check').out.includes(`pid ${agent.pid} `), 10000, 'check to see the agent');
+  r = run('check');
+  assert.match(r.out, new RegExp(`pid ${agent.pid} node \\(cursor-agent\\): ok, 1 connection\\(s\\) via 127\\.0\\.0\\.1:${port}`));
+  assert.ok(!r.out.includes('agent-secret') && !r.out.includes('worker'), r.out);
 
   const otherPort = String(other.address().port);
   r = run('launch', '--port', otherPort);

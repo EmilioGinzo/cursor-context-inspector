@@ -2,7 +2,8 @@
 
 Run:    mitmdump -q -p 8080 -s tools/cursor-wire.py [--set wire_dir=DIR]
         (or `tools/cursor-wire start`, which does this in the background)
-Cursor: /usr/share/cursor/cursor --proxy-server=http://127.0.0.1:8080
+Cursor: `tools/cursor-wire launch` (see `tools/cursor-wire env`: --proxy-server for Chromium,
+        HTTPS_PROXY and NODE_USE_ENV_PROXY for its Node children such as the agent worker)
 
 Bodies stream through untouched (Cursor's agent RPCs are bidirectional HTTP/2
 streams), and every chunk is appended, gzipped, as it passes. One folder per flow,

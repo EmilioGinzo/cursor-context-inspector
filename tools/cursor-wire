@@ -12,6 +12,8 @@
 #                                  cursor-wire.py, unless --any-proxy
 #   cursor-wire env [--port N] [--any-proxy]
 #                                  print the command `launch` runs
+#   cursor-wire check [--port N]   list Cursor's processes and flag any that reach :443
+#                                  directly instead of through the proxy
 #
 # Captures, pidfile, port and log live in $CURSOR_WIRE_DIR (default ~/.cursor-wire).
 set -euo pipefail
@@ -161,12 +163,70 @@ cmd_launch() {
       || die "127.0.0.1:$p is not a mitmdump running cursor-wire.py; pass --any-proxy to use it anyway"
   fi
   [ -f "$CA" ] || die "no mitmproxy CA at $CA; run: cursor-wire ca install"
+  local proxy=http://127.0.0.1:$p
+  # Chromium follows --proxy-server; Cursor's Node children, such as the agent worker, only these.
+  local env=(NODE_EXTRA_CA_CERTS="$CA" NODE_USE_ENV_PROXY=1
+    HTTPS_PROXY="$proxy" https_proxy="$proxy" HTTP_PROXY="$proxy" http_proxy="$proxy"
+    NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1)
+  local cmd=("$CURSOR" --password-store=gnome-libsecret --proxy-server="$proxy")
   if [ "$print" = print ]; then
-    printf 'NODE_EXTRA_CA_CERTS=%q %q --password-store=gnome-libsecret --proxy-server=http://127.0.0.1:%s\n' \
-      "$CA" "$CURSOR" "$p"
+    printf '%q ' "${env[@]}" "${cmd[@]}" | sed 's/ $/\n/'
     return
   fi
-  NODE_EXTRA_CA_CERTS=$CA exec "$CURSOR" --password-store=gnome-libsecret --proxy-server="http://127.0.0.1:$p" "$@"
+  exec env "${env[@]}" "${cmd[@]}" "$@"
+}
+
+# Cursor's processes, as "pid kind": the app (cursor, or electron running cursor.mjs), the agent
+# worker (cursor-agent), and everything they started. Their command lines hold API keys: read
+# them here, never print them.
+cursor_pids() {
+  local d pid ppid stat arg
+  local -a argv
+  declare -A kind parent
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    { read -r stat <"$d/stat" && mapfile -d '' -t argv <"$d/cmdline"; } 2>/dev/null || continue
+    stat=${stat##*) }; stat=${stat#* }; parent[$pid]=${stat%% *}
+    [[ ${argv[0]:-} =~ (^|/)[Cc]ursor$ ]] && kind[$pid]=cursor
+    for arg in "${argv[@]}"; do
+      if [[ $arg =~ (^|/)cursor-agent$ ]]; then kind[$pid]=cursor-agent; break; fi
+      [[ $arg =~ (^|/)cursor\.mjs$ ]] && kind[$pid]=cursor
+    done
+  done
+  for pid in "${!parent[@]}"; do
+    ppid=${parent[$pid]}
+    while [ -z "${kind[$pid]:-}" ] && [ "${ppid:-0}" -gt 1 ]; do
+      [ -n "${kind[$ppid]:-}" ] && kind[$pid]=${kind[$ppid]}
+      ppid=${parent[$ppid]:-0}
+    done
+  done
+  for pid in "${!kind[@]}"; do echo "$pid ${kind[$pid]}"; done | sort -n
+}
+
+cmd_check() {
+  local p pid kind exe peers direct proxied bad=0 idle=""
+  p=$(recorded_port) || p=""
+  if [ "${1:-}" = --port ]; then p=${2:?--port needs a number}; fi
+  [ -z "$p" ] || is_port "$p"
+  local conns; conns=$(ss -Htnp state established 2>/dev/null) || die "ss not found (package iproute2)"
+  local list; list=$(cursor_pids)
+  [ -n "$list" ] || { echo "no Cursor processes running"; return; }
+  while read -r pid kind; do
+    exe=$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null)" 2>/dev/null) || exe=?
+    peers=$(grep -E "[(,]pid=$pid," <<<"$conns" | awk '{print $4}') || true
+    direct=$(grep -E ':443$' <<<"$peers" | grep -vE '^(127\.|\[::1\]|\[::ffff:127\.)' | sort -u | paste -sd ' ') || true
+    proxied=$(grep -cxF "127.0.0.1:${p:-none}" <<<"$peers") || true
+    if [ -n "$direct" ]; then
+      bad=1
+      echo "pid $pid $exe ($kind): DIRECT to $direct, not through the proxy"
+    elif [ -n "$peers" ]; then
+      echo "pid $pid $exe ($kind): ok, $proxied connection(s) via 127.0.0.1:${p:-?}"
+    else
+      idle+=" $pid"
+    fi
+  done <<<"$list"
+  [ -z "$idle" ] || echo "no connections:$idle"
+  [ "$bad" = 0 ] || die "some Cursor traffic bypasses the proxy; was Cursor started with: cursor-wire launch?"
 }
 
 case ${1:-} in
@@ -176,5 +236,6 @@ case ${1:-} in
   ca) shift; cmd_ca "$@" ;;
   launch) shift; cmd_launch run "$@" ;;
   env) shift; cmd_launch print "$@" ;;
+  check) shift; cmd_check "$@" ;;
   *) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//'; [ -n "${1:-}" ] && exit 1 || exit 0 ;;
 esac

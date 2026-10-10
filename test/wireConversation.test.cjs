@@ -380,6 +380,25 @@ test('compare: context sent only by reference is reported with its size', (t) =>
   assert.strictEqual(verdict(r, 'request-context'), 'contradicted');
 });
 
+test('compare: settings, the editor\'s rich text and a new conversation\'s empty state are not findings', (t) => {
+  const { wire, history } = tmp(t);
+  const richText = JSON.stringify({ root: { children: [{ type: 'paragraph', children: [{ type: 'text', text: 'hello' }] }] } });
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', {
+    url: 'https://x/agent.v1.AgentService/Run', started: 1,
+    reqBody: stream([client({ run_request: { conversation_id: CID, conversation_state: {},
+      action: { user_message_action: { user_message: { text: 'hello', rich_text: richText, simulated_msg_reason: 'SIMULATED_MSG_REASON_PLAN_EXECUTION' } } } } })], false),
+    respBody: stream([
+      ...['sys', 'u0', 'a0'].map((n, i) => server({ kv_server_message: { id: i, set_blob_args: { blob_id: M[n].id, blob_data: M[n].data } } })),
+      server({ interaction_update: { text_delta: { text: 'Hi!' } } }),
+      server({ conversation_checkpoint_update: { root_prompt_messages_json: ids('sys', 'u0', 'a0') } }),
+    ]),
+  });
+  writeRecord(history, { seen: ['sys', 'u0', 'a0'], snapshots: [['sys', 'u0', 'a0']] });
+  const [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  assert.deepStrictEqual(r.runs[0].prompt.states.map((s) => [s.state, s.messages, !!s.snapshot]), [['request', 0, false], ['checkpoint#0', 3, true]]);
+  assert.deepStrictEqual(kinds(r), []);
+});
+
 test('diffText and outOfOrder', () => {
   assert.deepStrictEqual(compareLib.diffText('same', 'same'), { same: true });
   const d = compareLib.diffText('a\nb\nc\nd', 'a\nB\nc\nd');

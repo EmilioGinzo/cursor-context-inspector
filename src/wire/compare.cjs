@@ -130,8 +130,12 @@ function leaves(v, at = '', out = []) {
   return out;
 }
 
-// Ids and handles the client sends that are not prompt content.
-const NOT_CONTENT = /(_blob_id|(^|\.)message_id|_id)$/;
+// Ids and handles the client sends that are not prompt content, and the editor's JSON of the user's
+// own text (rich_text).
+const NOT_CONTENT = /(_blob_id|(^|\.)message_id|_id|(^|\.)rich_text)$/;
+// Enum values decode to their names (PERMISSION_MODE_DEFAULT): settings, not prompt text.
+const ENUM_NAME = /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/;
+const isContent = (l) => l.text.length >= MIN_LEAF && !NOT_CONTENT.test(l.path) && !ENUM_NAME.test(l.text);
 
 // How `text` appears in `haystack` when not verbatim: 'whitespace' (equal once runs of whitespace are
 // collapsed), 'prefix' (a leading part of 40+ chars is there, cut with an ellipsis: shortened), 'lines'
@@ -261,7 +265,8 @@ function compareRun(run, rec, ctx) {
   // Each prompt state the wire carried, against the snapshots.
   const snapKeys = new Map(rec.snapshots.map((s) => [(s.messages || []).join(','), s.file]));
   out.prompt.states = states.map((s, i) => ({ state: i === 0 && run.initialState ? 'request' : `checkpoint#${i - (run.initialState ? 1 : 0)}`, messages: s.rootPrompt.length, snapshot: snapKeys.get(s.rootPrompt.join(',')) }));
-  const unmatched = out.prompt.states.filter((s) => !s.snapshot);
+  // A new conversation's empty state is no prompt: there is nothing to snapshot.
+  const unmatched = out.prompt.states.filter((s) => !s.snapshot && s.messages);
   if (unmatched.length) add('prompt-state-without-snapshot', 'snapshots', { states: unmatched.map((s) => s.state) });
   const wrong = outOfOrder(after, rec.seen);
   if (wrong.length) add('order-differs', 'seen-order', { ids: wrong, wireOrder: after.filter((h) => wrong.includes(h)).map((h) => after.indexOf(h)), seenOrder: wrong.map((h) => rec.seen.indexOf(h)) });
@@ -368,7 +373,7 @@ function checkTools(run, addedMsgs, add) {
     const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
     if (!ask || !ask.args || !ask.args.tool_call_id) continue;
     for (const l of leaves(e.result)) {
-      if (l.text.length < MIN_LEAF || NOT_CONTENT.test(l.path) || recordedResults.includes(l.text)) continue;
+      if (!isContent(l) || recordedResults.includes(l.text)) continue;
       const match = looseMatch(l.text, recordedResults, cache);
       const detail = { execId: e.id, op: e.op, toolCallId: ask.args.tool_call_id, path: l.path, match, text: l.text };
       if (match === 'none') add('tool-output-not-in-recorded-result', 'tool-calls', detail);
@@ -395,7 +400,7 @@ function checkRequestContext(run, rec, add, ctx) {
     ...leaves(run.action.requestContextParts, 'request_context_parts'),
   ];
   for (const b of run.blobs.values()) {
-    const role = (b.roles || []).find((r) => /^(context_|user_message_)/.test(r.ref));
+    const role = (b.roles || []).find((r) => /^(context_|user_message_)/.test(r.ref) && r.ref !== 'user_message_rich_text');
     if (role) sources.push(...leaves(b.decoded.json !== undefined ? b.decoded.json : b.decoded.text, `blob ${b.id.slice(0, 12)} (${role.ref})`));
   }
   for (const e of run.client.filter((x) => x.kind === 'exec_result')) {
@@ -404,7 +409,7 @@ function checkRequestContext(run, rec, add, ctx) {
   }
   const cache = ctx.looseCache;
   for (const l of sources) {
-    if (l.text.length < MIN_LEAF || l.text === um || NOT_CONTENT.test(l.path) || haystack.includes(l.text)) continue;
+    if (!isContent(l) || l.text === um || haystack.includes(l.text)) continue;
     const match = looseMatch(l.text, haystack, cache);
     if (match === 'none') add('sent-context-not-in-record', 'request-context', { path: l.path, match, text: l.text });
     else add('sent-context-reformatted-in-record', undefined, { path: l.path, match, text: l.text });

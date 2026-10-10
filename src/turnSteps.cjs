@@ -1,0 +1,174 @@
+'use strict';
+
+// The agent's steps as Cursor stores them beside the prompt, and the readable thinking among them.
+//
+// The prompt messages keep the model's thinking only as `redacted-reasoning` parts: reasoning the
+// model's provider returned encrypted (Anthropic's redacted_thinking, OpenAI's encrypted_content,
+// Cursor's own models alike). Cursor passes it back to the model verbatim and never decrypts it;
+// its UI shows "[REDACTED]". What Cursor showed as thinking lives in the conversation's turns:
+//
+//   conversationState field 8 (turns)    agentKv:blob ids of ConversationTurnStructure
+//   ConversationTurnStructure            1 agent_conversation_turn { 1 user_message, 2 steps (blob ids) }
+//   ConversationStep                     1 assistant_message { 1 text }  2 tool_call  3 thinking_message { 1 text, 2 duration_ms }
+//
+// These are protobuf (not JSON). placeThinking puts each thinking step on the prompt message the
+// model wrote with it, and on that message's reasoning part.
+
+function readVarint(buf, pos) {
+  let result = 0;
+  let shift = 0;
+  for (;;) {
+    const byte = buf[pos++];
+    if (byte === undefined) throw new Error('truncated varint');
+    result += (byte & 0x7f) * 2 ** shift;
+    shift += 7;
+    if (byte < 0x80) return [result, pos];
+  }
+}
+
+// The top-level fields of a protobuf message: [{ no, value }], value a number or a Buffer.
+function fields(buf) {
+  const out = [];
+  let pos = 0;
+  while (pos < buf.length) {
+    let tag;
+    [tag, pos] = readVarint(buf, pos);
+    const no = Math.floor(tag / 8);
+    const wire = tag & 7;
+    let value;
+    if (wire === 0) [value, pos] = readVarint(buf, pos);
+    else if (wire === 1) { value = buf.subarray(pos, pos + 8); pos += 8; }
+    else if (wire === 5) { value = buf.subarray(pos, pos + 4); pos += 4; }
+    else if (wire === 2) {
+      let len;
+      [len, pos] = readVarint(buf, pos);
+      value = buf.subarray(pos, pos + len);
+      pos += len;
+    } else throw new Error(`unsupported wire type ${wire}`);
+    if (pos > buf.length) throw new Error('truncated field');
+    out.push({ no, value });
+  }
+  return out;
+}
+
+const field = (buf, no) => { const f = fields(buf).find((x) => x.no === no); return f && f.value; };
+const text = (buf, no) => { const v = field(buf, no); return Buffer.isBuffer(v) ? v.toString('utf8') : ''; };
+
+function getBytes(db, key) {
+  const row = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?').get(key);
+  if (!row) return undefined;
+  return typeof row.value === 'string' ? Buffer.from(row.value, 'utf8') : Buffer.from(row.value);
+}
+
+function turnHashes(conversationState) {
+  if (typeof conversationState !== 'string' || !conversationState.startsWith('~')) return [];
+  return fields(Buffer.from(conversationState.slice(1), 'base64')).filter((f) => f.no === 8 && Buffer.isBuffer(f.value) && f.value.length === 32).map((f) => f.value.toString('hex'));
+}
+
+// One step: { hash, kind: 'thinking' | 'text' | 'tool-call' | 'missing', text?, durationMs?, data? }.
+// data (tool calls only) is the step's bytes, to find the call's id and arguments in.
+function decodeStep(hash, data) {
+  if (!data) return { hash, kind: 'missing' };
+  const f = fields(data)[0];
+  if (!f || !Buffer.isBuffer(f.value)) return { hash, kind: 'unknown' };
+  if (f.no === 3) {
+    const duration = field(f.value, 2);
+    return { hash, kind: 'thinking', text: text(f.value, 1), ...(typeof duration === 'number' ? { durationMs: duration } : {}) };
+  }
+  if (f.no === 1) return { hash, kind: 'text', text: text(f.value, 1) };
+  if (f.no === 2) return { hash, kind: 'tool-call', data };
+  return { hash, kind: 'unknown' };
+}
+
+// The chat's turns, in order: [{ turn, steps }]. Shell turns (commands the user ran) have no steps.
+function loadTurns(db, conversationState) {
+  return turnHashes(conversationState).map((turn) => {
+    const data = getBytes(db, `agentKv:blob:${turn}`);
+    let steps = [];
+    try {
+      const agentTurn = data && field(data, 1);
+      if (Buffer.isBuffer(agentTurn)) {
+        steps = fields(agentTurn).filter((f) => f.no === 2 && Buffer.isBuffer(f.value)).map((f) => {
+          const hash = f.value.toString('hex');
+          try {
+            return decodeStep(hash, getBytes(db, `agentKv:blob:${hash}`));
+          } catch {
+            return { hash, kind: 'unknown' };
+          }
+        });
+      }
+    } catch { /* not a turn Cursor's way: no steps */ }
+    return { turn, missing: !data, steps };
+  });
+}
+
+const reasoningLike = (p) => p.type === 'redacted-reasoning' || p.type === 'reasoning';
+
+// Whether a prompt part is the one this step produced: the same agent text; a tool call whose id,
+// or else every string argument, appears in the step's bytes.
+function anchor(step) {
+  if (step.kind === 'text') {
+    const t = step.text.trim();
+    return t ? (p) => p.type === 'text' && typeof p.text === 'string' && p.text.trim() === t : undefined;
+  }
+  if (step.kind !== 'tool-call') return undefined;
+  const has = (s) => s.length > 0 && step.data.includes(Buffer.from(s, 'utf8'));
+  return (p) => {
+    if (p.type !== 'tool-call') return false;
+    if (typeof p.toolCallId === 'string' && has(p.toolCallId)) return true;
+    const args = p.args && typeof p.args === 'object' ? Object.values(p.args).filter((v) => typeof v === 'string') : [];
+    return args.length > 0 && args.every(has);
+  };
+}
+
+// turns: from loadTurns. messages: [{ hash, message }], the chat's prompt messages in conversation
+// order. Returns the thinking steps in order: [{ step, turn, text, durationMs?, message, part }],
+// message being the hash of the prompt message the model wrote with that thinking and part the index
+// of its reasoning part (both null when not found).
+//
+// The steps of a model response are its thinking, then its text and tool calls; the prompt keeps
+// that response as one assistant message. Each run of thinking goes to the message holding the
+// first text or tool call after it that the record has; when nothing identifiable followed it, to
+// the next message with a reasoning part. Messages are searched forward from the last one placed.
+function placeThinking(turns, messages) {
+  const out = [];
+  let cursor = -1;
+  const find = (pred) => {
+    for (let i = cursor + 1; i < messages.length; i++) {
+      const m = messages[i].message;
+      if (m && m.role === 'assistant' && Array.isArray(m.content) && m.content.some(pred)) return i;
+    }
+    return -1;
+  };
+  const placed = new Map(); // message index -> thinking entries, in order
+  for (const { turn, steps } of turns) {
+    const groups = [];
+    for (const step of steps) {
+      const thinking = step.kind === 'thinking';
+      if (!groups.length || (thinking && groups[groups.length - 1].rest.length)) groups.push({ thinking: [], rest: [] });
+      groups[groups.length - 1][thinking ? 'thinking' : 'rest'].push(step);
+    }
+    for (const g of groups) {
+      let i = -1;
+      const anchors = g.rest.map(anchor).filter(Boolean);
+      for (const pred of anchors) if ((i = find(pred)) !== -1) break;
+      if (!anchors.length && g.thinking.length) i = find(reasoningLike);
+      const entries = g.thinking.map((s) => ({ step: s.hash, turn, text: s.text, ...(s.durationMs !== undefined ? { durationMs: s.durationMs } : {}), message: null, part: null }));
+      out.push(...entries);
+      if (i === -1) continue;
+      cursor = i;
+      if (entries.length) placed.set(i, [...(placed.get(i) || []), ...entries]);
+    }
+  }
+  for (const [i, entries] of placed) {
+    const { hash, message } = messages[i];
+    const parts = message.content.map((p, k) => (reasoningLike(p) ? k : -1)).filter((k) => k !== -1);
+    entries.forEach((e, k) => {
+      e.message = hash;
+      e.part = k < parts.length ? parts[k] : null;
+    });
+  }
+  return out;
+}
+
+module.exports = { fields, turnHashes, loadTurns, placeThinking };

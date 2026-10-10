@@ -407,3 +407,21 @@ test('a message Cursor writes after its chat is recorded reaches the record', ()
   assert.match(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8'), /first answer/);
   assert.strictEqual(history.tick(db, dir).pending, 0, 'settled once the message is recorded');
 });
+
+test('a state recorded under a send time is not overwritten when the run is summarized and grows again', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  const next = { role: 'user', content: 'next question' };
+  const second = { role: 'assistant', content: [{ type: 'text', text: 'second answer' }] };
+  save(1000, [sys, first, answer, next, second], { status: 'generating' });
+  history.tick(db, dir);
+  // Cursor summarizes mid-run, then the run goes on: same send time, new prompt.
+  save(1000, [sys, summary], { status: 'generating', summaries: 1 });
+  history.tick(db, dir);
+  save(1000, [sys, summary, next, second], { status: 'completed', summaries: 1 });
+  history.tick(db, dir);
+  const chat = path.join(dir, 'chats', 'History chat', 'snapshots');
+  const states = fs.readdirSync(chat).map((f) => JSON.parse(fs.readFileSync(path.join(chat, f), 'utf8')).messages.join());
+  assert.strictEqual(states.length, 7, '3 + 1 derived states and 3 updates');
+  assert.strictEqual(new Set(states).size, 7, 'every state kept');
+});

@@ -131,6 +131,13 @@ function chatDirFor(db, dir, composerId, name = chatName(db, composerId), from =
   return chatDir;
 }
 
+// Never overwrite a snapshot: a run recorded mid-way, or summarized, has several states under
+// one timestamp. A taken name gets `-at<recordedAt>`, not to be read as `-<n>`.
+function newSnapshotFile(chatDir, name) {
+  const file = path.join(chatDir, 'snapshots', `${name}.json`);
+  return fs.existsSync(file) ? path.join(chatDir, 'snapshots', `${name}-at${Date.now()}.json`) : file;
+}
+
 // Record one chat and the subagents it spawned. Returns the number of new snapshots.
 function recordChat(db, composerId, dir, visited = new Set()) {
   if (visited.has(composerId)) return 0;
@@ -171,9 +178,6 @@ function recordChat(db, composerId, dir, visited = new Set()) {
     if (fetched && meta.seen) writeTranscript(db, dir, chatDir, meta, hashes);
     return recorded;
   }
-  // Never overwrite a snapshot: two states may share a timestamp.
-  let snapshotFile = path.join(chatDir, 'snapshots', `${changedAt(composer)}.json`);
-  if (fs.existsSync(snapshotFile)) snapshotFile = snapshotFile.replace(/\.json$/, `-${Date.now()}.json`);
 
   // The states the chat went through since the last snapshot, written before this update's
   // snapshot and latest.json, which mark the update as recorded.
@@ -181,7 +185,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   const model = composer.modelConfig && composer.modelConfig.modelName;
   const earlier = earlierStates(dir, hashes, summaries, latest);
   for (const { before, state } of earlier) {
-    writeAtomic(path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}-${before}.json`), JSON.stringify({
+    writeAtomic(newSnapshotFile(chatDir, `${composer.lastUpdatedAt}-${before}`), JSON.stringify({
       composerId, recordedAt: Date.now(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
     }, null, 2));
   }
@@ -196,7 +200,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
     summaries,
     messages: hashes,
   };
-  writeAtomic(snapshotFile, JSON.stringify(snapshot, null, 2));
+  writeAtomic(newSnapshotFile(chatDir, changedAt(composer)), JSON.stringify(snapshot, null, 2));
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...readJson(metaFile, {}) };

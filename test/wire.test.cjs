@@ -99,6 +99,37 @@ test('schema decode keeps unknown fields, wire-type mismatches and superseded on
   assert.strictEqual(byNo[500].string, 'tail text');
 });
 
+test('fields with unresolved schema types decode schema-less, under their names', () => {
+  const loose = {
+    messages: {
+      'test.Loose': {
+        fields: [
+          f(1, 'msg', 'message', null),
+          f(2, 'unknownKind', null, null, { repeated: true }),
+          f(3, 'level', 'enum', null),
+          f(4, 'byKey', 'map', undefined, { K: 9, V: { kind: 'message', T: null } }),
+          f(5, 'nan', 'scalar', 1),
+        ],
+      },
+    },
+    enums: {},
+  };
+  const buf = pb.msg(pb.len(1, child('inner')), pb.v(2, 7), pb.v(3, 2), pb.len(4, pb.msg(pb.len(1, 'k'), pb.len(2, child('val')))), pb.d(5, NaN));
+  const out = protobuf.decodeMessage(loose, 'test.Loose', buf);
+  const byNo = Object.fromEntries(out._unknown.map((u) => [u.no, u]));
+  assert.strictEqual(byNo[1].field, 'msg');
+  assert.strictEqual(byNo[1].unresolvedType, true);
+  assert.strictEqual(byNo[1].message[0].string, 'inner');
+  assert.strictEqual(byNo[2].value, '7');
+  assert.strictEqual(out.level, 2);
+  assert.strictEqual(out.byKey.k.unresolvedType, true);
+  assert.strictEqual(out.byKey.k.message[0].string, 'val');
+  assert.strictEqual(out.nan, 'NaN');
+  const text = require('../src/wire/render.cjs').valueLines('', out, '', 0).join('\n');
+  assert.match(text, /#1 msg len\(7\)  \(type unresolved in the schema\) message:\n {4}#1 len\(5\) "inner"/);
+  assert.match(text, /byKey:\n {2}k len\(5\)  \(type unresolved in the schema\) message:/);
+});
+
 test('schema decode of malformed or truncated input returns what parsed plus the rest', () => {
   const good = pb.msg(pb.len(1, 'ok'), pb.v(2, 1));
   const bad = Buffer.concat([good, pb.tag(6, 2), pb.varint(50), Buffer.from('short')]);

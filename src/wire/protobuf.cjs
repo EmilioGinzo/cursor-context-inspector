@@ -6,7 +6,9 @@
 //
 // Schema shape (see src/wire/schema.cjs): { messages: { "pkg.Type": { fields: [
 //   { no, name, kind: scalar|enum|message|map, T, K?, V?, repeated, oneof, opt } ] } }, enums: {...} }
-// T for scalars is protobuf-es ScalarType.
+// T for scalars is protobuf-es ScalarType. A field whose type the extractor could not resolve
+// has T: null (and maybe kind: null); its values are decoded schema-less, under `_unknown`
+// (map values in place), marked `unresolvedType`.
 
 const MAX_DEPTH = 64;
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -176,10 +178,13 @@ function decodeRaw(buf, depth = 0) {
 
 // ---------- schema-aware ----------
 
+// JSON has no NaN or Infinity; spell them as strings, like protobuf's JSON mapping.
+const jsonNumber = (x) => (Number.isFinite(x) ? x : String(x));
+
 function scalarValue(t, wire, v) {
   switch (t) {
-    case S.DOUBLE: return v.readDoubleLE(0);
-    case S.FLOAT: return v.readFloatLE(0);
+    case S.DOUBLE: return jsonNumber(v.readDoubleLE(0));
+    case S.FLOAT: return jsonNumber(v.readFloatLE(0));
     case S.INT64: return BigInt.asIntN(64, v).toString();
     case S.UINT64: return v.toString();
     case S.INT32: return Number(BigInt.asIntN(32, v));
@@ -213,6 +218,9 @@ function enumValue(schema, typeName, v) {
   return names && names[String(n)] !== undefined ? names[String(n)] : n;
 }
 
+// Field (or map value) types the extractor left unresolved. An enum without T still decodes, to numbers.
+const unresolved = (kind, T) => kind === null || kind === undefined || (kind === 'message' && !T);
+
 function packable(field) {
   return field.kind === 'enum' || (field.kind === 'scalar' && scalarWire(field.T) !== WIRE.LEN);
 }
@@ -241,6 +249,7 @@ function decodeMapEntry(schema, field, buf, depth) {
     const { no, wire } = r.tag();
     const v = r.value(wire, no);
     if (no === 1 && wire === scalarWire(field.K)) key = scalarValue(field.K, wire, v);
+    else if (no === 2 && unresolved(V.kind, V.T)) value = { unresolvedType: true, ...rawValue(no, wire, v, depth, offset) };
     else if (no === 2 && wire === expectedWire(V.kind, V.T)) value = fieldValue(schema, V.kind, V.T, wire, v, depth);
     else unknown.push(rawValue(no, wire, v, depth, offset));
   }
@@ -282,6 +291,10 @@ function decodeMessage(schema, typeName, buf, depth = 0) {
     const field = byNo.get(no);
     if (!field) {
       unknown.push(rawValue(no, wire, v, depth, offset));
+      continue;
+    }
+    if (field.kind !== 'map' && unresolved(field.kind, field.T)) {
+      unknown.push({ ...rawValue(no, wire, v, depth, offset), field: field.name, unresolvedType: true });
       continue;
     }
     try {

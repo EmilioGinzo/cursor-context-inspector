@@ -16,8 +16,8 @@ function stringLines(label, s, pad, clip) {
 function rawLines(fields, pad, clip) {
   const out = [];
   for (const f of fields) {
-    const name = `#${f.no}${f.field ? ` ${f.field}` : ''}`;
-    const notes = [f.mismatch && `wire type mismatch, ${f.mismatch}`, f.error && `error: ${f.error}`].filter(Boolean).join('; ');
+    const name = f.label ?? `#${f.no}${f.field ? ` ${f.field}` : ''}`;
+    const notes = [f.mismatch && `wire type mismatch, ${f.mismatch}`, f.error && `error: ${f.error}`, f.unresolvedType && 'type unresolved in the schema'].filter(Boolean).join('; ');
     const tail = notes ? `  (${notes})` : '';
     if (f.superseded !== undefined) {
       out.push(...valueLines(`${name} superseded by a later value: `, f.superseded, pad, clip));
@@ -44,6 +44,7 @@ function rawLines(fields, pad, clip) {
 }
 
 function valueLines(label, v, pad, clip) {
+  if (v && v.unresolvedType && v.wire) return rawLines([{ ...v, label: label.replace(/: $/, '') }], pad, clip);
   if (v === null || typeof v !== 'object') {
     return typeof v === 'string' ? stringLines(label, v, pad, clip) : [`${pad}${label}${v}`];
   }
@@ -56,7 +57,7 @@ function valueLines(label, v, pad, clip) {
   const inner = label ? `${pad}  ` : pad;
   for (const [k, val] of Object.entries(v)) {
     if (k === '_unknown' && Array.isArray(val)) {
-      out.push(`${inner}_unknown (fields not in the schema):`, ...rawLines(val, `${inner}  `, clip));
+      out.push(`${inner}_unknown (fields not in the schema, or not decodable with it):`, ...rawLines(val, `${inner}  `, clip));
     } else if (k === '_error') {
       out.push(`${inner}_error: at byte ${val.offset}: ${val.message}`);
     } else {

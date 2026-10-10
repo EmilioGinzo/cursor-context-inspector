@@ -302,6 +302,8 @@ function decodeMessage(schema, typeName, buf, depth = 0) {
         if (wire !== WIRE.LEN) throw new Error(`map field with wire type ${WIRE_NAME[wire]}`);
         const entry = decodeMapEntry(schema, field, v, depth);
         out[field.name] = out[field.name] || {};
+        // A repeated key: the last entry wins, as in protobuf; keep the earlier value visible.
+        if (Object.hasOwn(out[field.name], entry.key)) unknown.push({ no, field: field.name, key: entry.key, superseded: out[field.name][entry.key] });
         out[field.name][entry.key] = entry.value;
         if (entry.unknown.length) unknown.push({ no, field: field.name, key: entry.key, mapEntryUnknown: entry.unknown });
         continue;

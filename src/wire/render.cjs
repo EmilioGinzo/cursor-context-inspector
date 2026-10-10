@@ -20,7 +20,7 @@ function rawLines(fields, pad, clip) {
     const notes = [f.mismatch && `wire type mismatch, ${f.mismatch}`, f.error && `error: ${f.error}`, f.unresolvedType && 'type unresolved in the schema'].filter(Boolean).join('; ');
     const tail = notes ? `  (${notes})` : '';
     if (f.superseded !== undefined) {
-      out.push(...valueLines(`${name} superseded by a later value: `, f.superseded, pad, clip));
+      out.push(...valueLines(`${name}${f.key !== undefined ? `[${JSON.stringify(f.key)}]` : ''} superseded by a later value: `, f.superseded, pad, clip));
     } else if (f.mapEntryUnknown) {
       out.push(`${pad}${name}[${JSON.stringify(f.key)}] unknown entry fields:`, ...rawLines(f.mapEntryUnknown, `${pad}  `, clip));
     } else if (f.wire === 'varint') {

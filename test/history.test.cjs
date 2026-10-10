@@ -492,3 +492,21 @@ test('chats recorded before thinking was kept get it', () => {
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'))[0].text, 'Say hello.');
   assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /<\/i><\/summary>\n\nSay hello\./);
 });
+
+test('thinking whose message was never recorded is shown before the first placed one, not after the chat', () => {
+  const { db, save, dir } = setup();
+  const answer = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Hello.' }] };
+  const more = { role: 'user', content: 'and then?' };
+  const end = { role: 'assistant', content: [{ type: 'text', text: 'The end.' }] };
+  // The first turn's answer was summarized away before the chat was recorded.
+  save(1000, [sys, first, answer, more, end], { turns: [
+    [step.thinking('Long gone.'), step.text('An answer nobody recorded.')],
+    [step.thinking('Say hello.'), step.text('Hello.')],
+    [step.text('The end.')],
+  ] });
+  history.recordUpdatedSince(db, dir, 0);
+  const md = fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8');
+  const gone = md.indexOf('<summary>Thinking <i>(its message is not in the record)</i></summary>\n\nLong gone.');
+  assert.ok(gone !== -1, 'labelled as unplaced');
+  assert.ok(md.indexOf('first question') < gone && gone < md.indexOf('Say hello.') && md.indexOf('Say hello.') < md.indexOf('The end.'), 'in order');
+});

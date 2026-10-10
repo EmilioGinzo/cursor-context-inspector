@@ -273,11 +273,14 @@ function writeTranscript(db, dir, chatDir, meta, currentHashes) {
 }
 
 // Thinking per message (aligned with `hashes`): placed thinking on its message; thinking whose
-// message is not in the record after the message the previous thinking was on (else the last).
+// message is not in the record after the message the previous thinking was on. Before any was
+// placed (messages summarized before the chat was first recorded), after the message before the
+// first placed one's; with none placed, after the last.
 function thinkingByMessage(thinking, hashes) {
   const out = hashes.map(() => []);
   const at = new Map(hashes.map((h, i) => [h, i]));
-  let last = hashes.length - 1;
+  const first = thinking.map((e) => at.get(e.message)).find((i) => i !== undefined);
+  let last = first === undefined ? hashes.length - 1 : Math.max(first - 1, 0);
   for (const e of thinking) {
     const i = at.get(e.message);
     if (i !== undefined) out[(last = i)].push(e);

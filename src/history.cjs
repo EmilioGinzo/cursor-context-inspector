@@ -206,6 +206,7 @@ function recordChat(db, composerId, dir, visited = new Set()) {
 // and a turn ended before each user message that follows the agent. Returns, for the states
 // since the `previous` snapshot, { before: index, state: 'prompt'|'turn end' }. Only while the
 // chat just grew: a summary rewrites the prompt, and prefixes of the rewritten one were never sent.
+// An edit of an earlier message also stops it: that run's states are not derived.
 function earlierStates(dir, hashes, summaries, previous) {
   const before = (previous && previous.messages) || [];
   if (before.length >= hashes.length || before.some((h, i) => hashes[i] !== h)) return [];

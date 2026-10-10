@@ -114,6 +114,26 @@ test('prompts are not derived across a summary', () => {
   assert.deepStrictEqual(snapshotMessages(path.join(other.dir, 'chats', 'History chat')), { '1000.json': 5, '2000-6.json': 6, '2000.json': 7 });
 });
 
+test('a history recorded before snapshots carried the summary count still gets the states since', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, summary, call('a'), result('a')], { summaries: 1 });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const latest = path.join(chat, 'latest.json');
+  const old = JSON.parse(fs.readFileSync(latest, 'utf8'));
+  delete old.summaries;
+  fs.writeFileSync(latest, JSON.stringify(old));
+  save(2000, [sys, summary, call('a'), result('a'), call('b'), result('b'), answer], { summaries: 1 });
+  history.recordUpdatedSince(db, dir, 1000);
+  assert.deepStrictEqual(snapshotMessages(chat), { '1000.json': 4, '2000-6.json': 6, '2000.json': 7 });
+
+  // Summarized since that old snapshot: the prompt no longer extends it, nothing is derived.
+  fs.writeFileSync(latest, JSON.stringify(old));
+  save(3000, [sys, summary, answer, call('c'), result('c'), answer], { summaries: 2 });
+  history.recordUpdatedSince(db, dir, 2000);
+  assert.deepStrictEqual(Object.keys(snapshotMessages(chat)).filter((f) => f.startsWith('3000')), ['3000.json']);
+});
+
 test('only one recorder holds the lock', () => {
   const { db, save, dir } = setup();
   save(1000, [sys]);

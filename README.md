@@ -260,6 +260,12 @@ hold your prompts, code and login tokens, so treat the folder like the chats
 themselves. `cursor-context wire ls|show` decodes them
 (added on a separate branch).
 
+Decoding needs Cursor's protobuf schema, which `bin/cursor-wire-schema.cjs`
+extracts from the installed bundles (`--app <dir>` if Cursor is not in
+`/usr/share/cursor/resources/app`). It prints a summary, `--out <file|->` writes
+the JSON, and it is cached per Cursor version in `~/.cursor-wire/schema/`
+(`--fresh` re-extracts).
+
 To undo: `tools/cursor-wire stop`, `tools/cursor-wire ca remove`, then
 `uv tool uninstall mitmproxy` (and delete `~/.mitmproxy` and `~/.cursor-wire`
 if you no longer want the CA or the captures).
@@ -282,6 +288,7 @@ src/history.cjs       session history recorder and backfill
 src/chatMarkdown.cjs  renders chat.md
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
+src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles
 tools/cursor-wire     wire-traffic recorder (mitmproxy add-on cursor-wire.py)
 test/                 node:test suites (npm test)
 ```

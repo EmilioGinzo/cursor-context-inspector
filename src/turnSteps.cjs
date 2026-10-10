@@ -104,21 +104,16 @@ function loadTurns(db, conversationState) {
 
 const reasoningLike = (p) => p.type === 'redacted-reasoning' || p.type === 'reasoning';
 
-// Whether a prompt part is the one this step produced: the same agent text; a tool call whose id,
-// or else every string argument, appears in the step's bytes.
+// Whether a prompt part is the one this step produced: the same agent text, or a tool call whose id
+// appears in the step's bytes. Every tool call step Cursor stores holds its call's id; matching by
+// arguments instead would take another call that ran the same command, in a later message.
 function anchor(step) {
   if (step.kind === 'text') {
     const t = step.text.trim();
     return t ? (p) => p.type === 'text' && typeof p.text === 'string' && p.text.trim() === t : undefined;
   }
   if (step.kind !== 'tool-call') return undefined;
-  const has = (s) => s.length > 0 && step.data.includes(Buffer.from(s, 'utf8'));
-  return (p) => {
-    if (p.type !== 'tool-call') return false;
-    if (typeof p.toolCallId === 'string' && has(p.toolCallId)) return true;
-    const args = p.args && typeof p.args === 'object' ? Object.values(p.args).filter((v) => typeof v === 'string') : [];
-    return args.length > 0 && args.every(has);
-  };
+  return (p) => p.type === 'tool-call' && typeof p.toolCallId === 'string' && p.toolCallId.length > 0 && step.data.includes(Buffer.from(p.toolCallId, 'utf8'));
 }
 
 // turns: from loadTurns. messages: [{ hash, message }], the chat's prompt messages in conversation
@@ -129,12 +124,13 @@ function anchor(step) {
 // The steps of a model response are its thinking, then its text and tool calls; the prompt keeps
 // that response as one assistant message. Each run of thinking goes to the message holding the
 // first text or tool call after it that the record has; when nothing identifiable followed it, to
-// the next message with a reasoning part. Messages are searched forward from the last one placed.
+// the next message with a reasoning part. Messages are searched forward from the last one placed,
+// which itself can hold more: a response that thought again between its tool calls.
 function placeThinking(turns, messages) {
   const out = [];
   let cursor = -1;
-  const find = (pred) => {
-    for (let i = cursor + 1; i < messages.length; i++) {
+  const find = (pred, from) => {
+    for (let i = from; i < messages.length; i++) {
       const m = messages[i].message;
       if (m && m.role === 'assistant' && Array.isArray(m.content) && m.content.some(pred)) return i;
     }
@@ -151,8 +147,8 @@ function placeThinking(turns, messages) {
     for (const g of groups) {
       let i = -1;
       const anchors = g.rest.map(anchor).filter(Boolean);
-      for (const pred of anchors) if ((i = find(pred)) !== -1) break;
-      if (!anchors.length && g.thinking.length) i = find(reasoningLike);
+      for (const pred of anchors) if ((i = find(pred, Math.max(cursor, 0))) !== -1) break;
+      if (!anchors.length && g.thinking.length) i = find(reasoningLike, cursor + 1);
       const entries = g.thinking.map((s) => ({ step: s.hash, turn, text: s.text, ...(s.durationMs !== undefined ? { durationMs: s.durationMs } : {}), message: null, part: null }));
       out.push(...entries);
       if (i === -1) continue;

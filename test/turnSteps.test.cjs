@@ -26,21 +26,32 @@ test('thinking goes to the message of the text or tool call after it, on its rea
     { hash: 'u', message: { role: 'user', content: 'hi' } },
     assistant('a1', R, { type: 'text', text: 'Looking.' }, { type: 'tool-call', toolCallId: 'call_1', toolName: 'Shell', args: { command: 'ls' } }),
     { hash: 't', message: { role: 'tool', content: [] } },
-    // A call Cursor's step does not store the id of: found by its arguments.
-    assistant('a2', R, { type: 'tool-call', toolCallId: 'call_2', toolName: 'Read', args: { path: '/x' } }),
-    assistant('a3', R, { type: 'tool-call', toolCallId: 'call_3', toolName: 'Shell', args: { command: 'make' } }),
+    // A response that thought again between its tool calls: both runs of thinking are on it.
+    assistant('a2', R, { type: 'tool-call', toolCallId: 'call_2', toolName: 'Read', args: { path: '/x' } }, R, { type: 'tool-call', toolCallId: 'call_3', toolName: 'Shell', args: { command: 'make' } }),
+    assistant('a3', R, { type: 'tool-call', toolCallId: 'call_4', toolName: 'Shell', args: { command: 'make' } }),
     // Thinking with nothing after it: the next message with a reasoning part.
     assistant('a4', { type: 'reasoning', text: 'shown' }),
   ];
   const turns = [{ turn: 'T', steps: [
     thinking('s1', 'plan'), text('s2', ' Looking. '), tool('s3', 'call_1', 'ls'),
-    thinking('s4', 'read x'), tool('s5', '/x', '2000'),
-    thinking('s6', 'build'), thinking('s7', 'more'), tool('s8', 'call_3'),
-    thinking('s9', 'last'),
+    thinking('s4', 'read x'), tool('s5', 'call_2', '/x'),
+    thinking('s6', 'build'), tool('s7', 'call_3', 'make'),
+    thinking('s8', 'again'), thinking('s9', 'more'), tool('s10', 'call_4', 'make'),
+    thinking('s11', 'last'),
   ] }];
   assert.deepStrictEqual(where(placeThinking(turns, messages)), [
-    ['s1', 'a1', 0], ['s4', 'a2', 0], ['s6', 'a3', 0], ['s7', 'a3', null], ['s9', 'a4', 0],
+    ['s1', 'a1', 0], ['s4', 'a2', 0], ['s6', 'a2', 2], ['s8', 'a3', 0], ['s9', 'a3', null], ['s11', 'a4', 0],
   ]);
+});
+
+test('a tool call is matched by its id only: a later call with the same arguments is another message', () => {
+  // The record lacks the message of call_1; call_2 ran the same command later.
+  const messages = [assistant('a2', R, { type: 'tool-call', toolCallId: 'call_2', toolName: 'Shell', args: { command: 'git status' } })];
+  const turns = [{ turn: 'T', steps: [
+    thinking('s1', 'check'), tool('s2', 'call_1', 'git status'),
+    thinking('s3', 'check again'), tool('s4', 'call_2', 'git status'),
+  ] }];
+  assert.deepStrictEqual(where(placeThinking(turns, messages)), [['s1', null, null], ['s3', 'a2', 0]]);
 });
 
 test('thinking whose message the record lacks stays unplaced, and does not take another\'s', () => {

@@ -144,13 +144,15 @@ All settings are under **Settings → Extensions → Agent Context Inspector**.
 ## Session history
 
 Every 30 s, if Cursor wrote anything, one Cursor window snapshots the chats
-that changed into `~/.cursor-context-history`:
+that changed into `~/.cursor-context-history`. A chat whose agent is still
+running is checked again on every write until its run ends, so the record
+holds its final state even when Cursor stores it without a newer timestamp:
 
 | Path | Contents |
 | --- | --- |
 | `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages. |
 | `chats/<chat name>/transcript.md` | Every prompt message ever seen in the chat, raw, in order. Messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned. |
-| `chats/<chat name>/snapshots/<lastUpdatedAt>.json` | Token breakdown and the prompt's message hashes at each update. |
+| `chats/<chat name>/snapshots/<time>.json` | Token breakdown and the prompt's message hashes at each change. `<time>` is when the chat last changed: the send, or the agent's last stored state. |
 | `chats/<chat name>/snapshots/<lastUpdatedAt>-<n>.json` | The first `n` of those hashes: a state the chat went through before that update. Cursor keeps only the newest state, but each assistant message was written by a model call that saw exactly the messages before it (`"state": "prompt"`), and a turn ended before each user message that follows the agent (`"turn end"`). Derived, not observed: only while the chat just grew, so not across a summary or an edit of an earlier message, which rewrite the prompt; the states of such a run are then not recorded. |
 | `chats/<chat name>/latest.json` | Newest snapshot plus Cursor's usage tree. |
 | `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order. |

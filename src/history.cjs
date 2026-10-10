@@ -429,6 +429,9 @@ function tryLock(dir, staleMs) {
 
 // 3: folders named after chats. 2: subagents nested in their parent.
 const LAYOUT = 3;
+// Bumped when a recorder bug may have left chats unrecorded: the backfill runs again.
+// 1: chats whose run ended after the watermark had passed their send time.
+const RESCAN = 1;
 
 // Called periodically. Records chats updated since the last tick, then catches up
 // on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
@@ -439,7 +442,8 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000 }
   const now = Date.now();
   const state = readJson(stateFile, { watermark: now, layout: LAYOUT });
   // Before 0.10 the first run went back only 7 days and never further.
-  if (!state.backfill) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
+  if (!state.backfill || state.rescan !== RESCAN) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
+  const rescan = state.rescan !== RESCAN;
   // Every tick: windows still running an older version may write id-named or flat folders.
   const migrated = migrateLayout(db, dir);
   const relayout = migrated || state.layout !== LAYOUT;
@@ -459,8 +463,8 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000 }
     state.backfill = older.more ? { ...state.backfill, from: older.watermark - 1 } : { done: true };
   }
   if (relayout && !recorded) writeIndex(dir);
-  if (relayout || result.watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
-    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, backfill: state.backfill, pending }));
+  if (relayout || rescan || result.watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
+    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
   return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length };
 }

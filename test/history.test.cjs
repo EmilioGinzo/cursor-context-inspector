@@ -275,7 +275,7 @@ test('older chats are caught up in batches, also after an earlier 7-day backfill
 
 // Cursor sets lastUpdatedAt when the user sends and leaves it there when the run
 // ends; a tick in between used to move the watermark past the chat for good.
-const settledState = (dir, watermark) => fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark, layout: 3, backfill: { done: true } }));
+const settledState = (dir, watermark) => fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark, layout: 3, rescan: 1, backfill: { done: true } }));
 const snapshots = (dir, name = 'History chat') => fs.readdirSync(path.join(dir, 'chats', name, 'snapshots')).sort();
 
 test('a chat ticked before its run stored any state is recorded when the run ends', () => {
@@ -313,10 +313,21 @@ test('a chat whose run ended after the watermark passed its send time is caught 
   assert.strictEqual(history.tick(db, dir).recorded, 1);
 });
 
+test('a history recorded before the fix is rescanned for chats it missed, without re-recording the others', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, first], { id: 'kept', name: 'Kept chat' });
+  history.recordUpdatedSince(db, dir, 0);
+  save(2000, [sys, first, answer], { id: 'missed', name: 'Missed chat', status: 'completed', conversationCheckpointLastUpdatedAt: 2013 });
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3, backfill: { done: true } }));
+  assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).recorded], [1, 0]);
+  assert.deepStrictEqual(snapshots(dir, 'Kept chat'), ['1000.json']);
+  assert.deepStrictEqual(snapshots(dir, 'Missed chat'), ['2013.json']);
+});
+
 test('a chat stuck unsettled is given up after a day', () => {
   const { db, save, dir } = setup();
   save(1000, [sys], { status: 'generating' });
-  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3, backfill: { done: true }, pending: { 'chat-1': Date.now() - 2 * 86400000 } }));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3, rescan: 1, backfill: { done: true }, pending: { 'chat-1': Date.now() - 2 * 86400000 } }));
   assert.deepStrictEqual([history.tick(db, dir).recorded, history.tick(db, dir).pending], [1, 0]);
 });
 

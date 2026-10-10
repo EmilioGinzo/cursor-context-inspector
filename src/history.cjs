@@ -12,6 +12,7 @@
 // <chat>/
 //   meta.json                      name, model, workspace, message hashes in first-seen order
 //   snapshots/<lastUpdatedAt>.json token breakdown + the root message hashes at that moment
+//   snapshots/<lastUpdatedAt>-<n>.json  the first n of them: a model call's prompt, or a turn's end, before that update
 //   latest.json                    newest snapshot plus Cursor's usage tree
 //   chat.md                        the conversation, readable: user, agent, thinking, tool calls
 //   transcript.md                  every message ever seen, raw text, in order; links subagents
@@ -151,15 +152,27 @@ function recordChat(db, composerId, dir, visited = new Set()) {
     if (value !== undefined) writeAtomic(blobFile, value);
   }
 
+  // The states the chat went through since the last snapshot, written before this update's
+  // snapshot: its file marks the update as recorded.
+  const summaries = store.summaryCount(composer.conversationState);
+  const model = composer.modelConfig && composer.modelConfig.modelName;
+  const earlier = earlierStates(dir, hashes, summaries, readJson(path.join(chatDir, 'latest.json'), undefined));
+  for (const { before, state } of earlier) {
+    writeAtomic(path.join(chatDir, 'snapshots', `${composer.lastUpdatedAt}-${before}.json`), JSON.stringify({
+      composerId, recordedAt: Date.now(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
+    }, null, 2));
+  }
+
   const breakdown = composer.promptTokenBreakdown || {};
   const snapshot = {
     composerId,
     recordedAt: Date.now(),
     lastUpdatedAt: composer.lastUpdatedAt,
-    model: composer.modelConfig && composer.modelConfig.modelName,
+    model,
     totalUsedTokens: breakdown.totalUsedTokens ?? composer.contextTokensUsed,
     maxTokens: breakdown.maxTokens ?? composer.contextTokenLimit,
     categories: breakdown.categories || [],
+    summaries,
     messages: hashes,
   };
   writeAtomic(snapshotFile, JSON.stringify(snapshot, null, 2));
@@ -181,11 +194,31 @@ function recordChat(db, composerId, dir, visited = new Set()) {
     subagentIds: composer.subagentComposerIds || [],
     lastUpdatedAt: composer.lastUpdatedAt,
     totalUsedTokens: snapshot.totalUsedTokens,
-    snapshots: (meta.snapshots || 0) + 1,
+    snapshots: (meta.snapshots || 0) + 1 + earlier.length,
   });
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
   writeTranscript(db, dir, chatDir, meta, hashes);
   return recorded + 1;
+}
+
+// Cursor keeps only the chat's newest state, but the states it went through are prefixes of it:
+// each assistant message was written by a model call that saw exactly the messages before it,
+// and a turn ended before each user message that follows the agent. Returns, for the states
+// since the `previous` snapshot, { before: index, state: 'prompt'|'turn end' }. Only while the
+// chat just grew: a summary rewrites the prompt, and prefixes of the rewritten one were never sent.
+function earlierStates(dir, hashes, summaries, previous) {
+  const before = (previous && previous.messages) || [];
+  if (before.length >= hashes.length || before.some((h, i) => hashes[i] !== h)) return [];
+  // Older snapshots lack `summaries`: the unchanged prefix shows the chat only grew.
+  if (summaries > (previous ? previous.summaries ?? summaries : 0)) return [];
+  const role = (i) => readJson(path.join(dir, 'blobs', `${hashes[i]}.json`), {}).role;
+  const states = [];
+  for (let i = before.length + 1; i < hashes.length; i++) {
+    const r = role(i);
+    if (r === 'assistant') states.push({ before: i, state: 'prompt' });
+    else if (r === 'user' && ['assistant', 'tool'].includes(role(i - 1))) states.push({ before: i, state: 'turn end' });
+  }
+  return states;
 }
 
 function writeTranscript(db, dir, chatDir, meta, currentHashes) {

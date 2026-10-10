@@ -19,8 +19,10 @@ function setup() {
     put(`agentKv:blob:${hash.toString('hex')}`, raw);
     return hash;
   };
-  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat' } = {}) => {
-    const state = Buffer.concat(messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]));
+  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0 } = {}) => {
+    // self_summary_count is field 17, varint: tag 0x88 0x01.
+    const count = summaries ? [Buffer.from([0x88, 0x01, summaries])] : [];
+    const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count]);
     put(`composerData:${id}`, JSON.stringify({
       name, lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
       promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] },
@@ -45,11 +47,12 @@ test('records snapshots, dedupes blobs, keeps messages dropped by summarization'
   assert.strictEqual(history.recordUpdatedSince(db, dir, 1000).recorded, 1);
 
   const chat = path.join(dir, 'chats', 'History chat');
-  assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), ['1000.json', '2000.json']);
+  // 1000-2: the prompt that produced the answer (message #2).
+  assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), ['1000-2.json', '1000.json', '2000.json']);
   assert.strictEqual(fs.readdirSync(path.join(dir, 'blobs')).length, 4, 'system message stored once');
   const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
   assert.strictEqual(meta.seen.length, 4);
-  assert.strictEqual(meta.snapshots, 2);
+  assert.strictEqual(meta.snapshots, 3);
 
   const md = fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8');
   assert.match(md, /## #1 user \(no longer in prompt\)\n\nfirst question/);
@@ -57,6 +60,58 @@ test('records snapshots, dedupes blobs, keeps messages dropped by summarization'
   assert.match(md, /## #3 user\n\n\[Previous conversation summary\]/);
   const index = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
   assert.strictEqual(index[0].name, 'History chat');
+});
+
+const call = (id) => ({ role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: id, args: {} }] });
+const result = (id) => ({ role: 'tool', content: [{ type: 'tool-result', toolCallId: id, result: 'ok' }] });
+const snapshotMessages = (chat) => Object.fromEntries(fs.readdirSync(path.join(chat, 'snapshots')).map((f) => [f, JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', f), 'utf8')).messages.length]));
+
+test('records the prompt of every model call and the end of every turn, not only the newest state', () => {
+  const { db, save, dir } = setup();
+  // One run: three model calls, two of them with tool results; one more call in the next run.
+  const run = [sys, first, call('a'), result('a'), call('b'), result('b'), result('c'), answer];
+  save(1000, run);
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.deepStrictEqual(snapshotMessages(chat), { '1000-2.json': 2, '1000-4.json': 4, '1000-7.json': 7, '1000.json': 8 });
+  const prompt = JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', '1000-4.json'), 'utf8'));
+  const full = JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', '1000.json'), 'utf8'));
+  assert.deepStrictEqual(prompt.messages, full.messages.slice(0, 4), 'a prompt refers to the stored blobs by id');
+  assert.deepStrictEqual([prompt.state, prompt.before], ['prompt', 4]);
+
+  const twoTurns = [...run, { role: 'user', content: 'second question' }, call('d'), result('d'), answer];
+  save(2000, twoTurns);
+  history.recordUpdatedSince(db, dir, 1000);
+  const after = snapshotMessages(chat);
+  assert.deepStrictEqual(Object.keys(after).filter((f) => f.startsWith('2000')).sort(), ['2000-11.json', '2000-9.json', '2000.json'], 'only states since the last snapshot');
+  assert.strictEqual(fs.readdirSync(path.join(dir, 'blobs')).length, 11, 'each message stored once');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8')).snapshots, 7);
+
+  // Both turns seen at once: the first turn's end is a state too.
+  save(3000, twoTurns, { id: 'chat-2', name: 'Two turns' });
+  history.recordUpdatedSince(db, dir, 2000);
+  const both = path.join(dir, 'chats', 'Two turns');
+  assert.deepStrictEqual(Object.keys(snapshotMessages(both)).sort(), ['3000-11.json', '3000-2.json', '3000-4.json', '3000-7.json', '3000-8.json', '3000-9.json', '3000.json']);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(both, 'snapshots', '3000-8.json'), 'utf8')).state, 'turn end');
+});
+
+test('prompts are not derived across a summary', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, first, call('a'), result('a')]);
+  history.recordUpdatedSince(db, dir, 0);
+  // The summary rewrote the prompt: its earlier prefixes were never sent.
+  save(2000, [sys, summary, call('b'), result('b'), answer], { summaries: 1 });
+  history.recordUpdatedSince(db, dir, 1000);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.deepStrictEqual(snapshotMessages(chat), { '1000-2.json': 2, '1000.json': 4, '2000.json': 5 });
+
+  // A chat first recorded after it was summarized, then growing again.
+  const other = setup();
+  other.save(1000, [sys, summary, call('b'), result('b'), answer], { summaries: 1 });
+  history.recordUpdatedSince(other.db, other.dir, 0);
+  other.save(2000, [sys, summary, call('b'), result('b'), answer, first, answer], { summaries: 1 });
+  history.recordUpdatedSince(other.db, other.dir, 1000);
+  assert.deepStrictEqual(snapshotMessages(path.join(other.dir, 'chats', 'History chat')), { '1000.json': 5, '2000-6.json': 6, '2000.json': 7 });
 });
 
 test('only one recorder holds the lock', () => {

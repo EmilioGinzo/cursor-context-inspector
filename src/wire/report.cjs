@@ -115,7 +115,7 @@ function renderComparison(r, { clip = 400 } = {}) {
     }
     if (run.added && run.added.length) out.push(`   added: ${run.added.map((a) => `${short(a.id)} ${a.role}[${a.parts.join(',')}]`).join('  ')}`);
     if (run.summary) out.push(`   summary: ${JSON.stringify(run.summary)}`);
-    if (run.contextParts && run.contextParts.length) out.push(`   context parts by id: ${run.contextParts.map((c) => `${c.kind} ${c.same ? '= recorded' : `!= recorded ${short(c.recordedId)}`}`).join(', ')}`);
+    if (run.contextParts && run.contextParts.length) out.push(`   context parts by id: ${run.contextParts.map((c) => `${c.kind} ${c.same ? `= recorded${c.redacted ? ' except redacted credentials' : ''}` : `!= recorded ${short(c.recordedId)}`}`).join(', ')}`);
     for (const l of renderFindings(run.findings, clip)) out.push(indent(l, '   '));
     if (!run.findings.length) out.push('   no differences');
   });

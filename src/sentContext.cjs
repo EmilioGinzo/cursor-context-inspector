@@ -4,6 +4,8 @@
 // subagent definitions, MCP tools: see requestContext.cjs), next to the chat's history.
 //
 // <history>/context/<sha256>.bin   one request-context part, exactly the bytes rebuilt (stored once)
+// <history>/context/<sha256>.redacted.bin  the same, when it held credentials: replaced (redact.cjs);
+//                                  the name keeps the sha256 of the bytes before, the one to compare
 // <history>/context/<sha256>.md    the same part, readable (collapsed sections, nothing cut)
 // <chat>/meta.json  sentContext    per user message: the part ids, when and how they were rebuilt
 //
@@ -16,6 +18,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const rc = require('./requestContext.cjs');
 const sources = require('./contextSources.cjs');
+const { redactValue } = require('./redact.cjs');
 
 // A message is matched with a rebuild made at most this long after it: later, the sources (rule
 // files, skills...) are more likely to have changed since the message was sent.
@@ -113,19 +116,27 @@ function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db
   const folders = sources.workspaceFolders(composer.workspaceIdentifier);
   const built = rebuild(folders, options, options.cache, db, dir);
   const entry = { messages, messageAt: composer.lastUpdatedAt, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
-  if (built.error) return { ...entry, error: built.error };
+  if (built.error) return { ...entry, error: redactValue(built.error).value };
   entry.parts = {};
   entry.storedByCursor = [];
   for (const kind of rc.PARTS) {
     const p = built.encoded[kind];
     if (!p) continue;
-    writeOnce(path.join(dir, 'context', `${p.id}.bin`), p.data);
-    writeOnce(path.join(dir, 'context', `${p.id}.md`), renderPart(kind, built.parts[kind], { id: p.id, bytes: p.bytes }));
-    entry.parts[kind] = { id: p.id, bytes: p.bytes, items: itemCount(kind, built.parts[kind]) };
+    // The id stays the sha256 of the bytes as rebuilt, the one to compare with Cursor's; what is
+    // stored has its credentials replaced, and says where.
+    const clean = redactValue(built.parts[kind]);
+    const redacted = clean.count ? { count: clean.count, paths: clean.paths } : undefined;
+    writeOnce(path.join(dir, 'context', partFile(p.id, redacted)), redacted ? rc.encodeParts({ [kind]: clean.value })[kind].data : p.data);
+    writeOnce(path.join(dir, 'context', `${p.id}.md`), renderPart(kind, clean.value, { id: p.id, bytes: p.bytes, redacted }));
+    entry.parts[kind] = { id: p.id, bytes: p.bytes, items: itemCount(kind, built.parts[kind]), ...(redacted ? { redacted } : {}) };
     if (db && hasBlob(db, p.id)) entry.storedByCursor.push(kind);
   }
-  if (built.dynamic) entry.dynamic = built.dynamic;
-  if (built.notes.length) entry.notes = built.notes;
+  if (built.dynamic) {
+    const clean = redactValue(built.dynamic);
+    entry.dynamic = clean.value;
+    if (clean.count) entry.dynamicRedacted = { count: clean.count, paths: clean.paths };
+  }
+  if (built.notes.length) entry.notes = redactValue(built.notes).value;
   return entry;
 }
 
@@ -146,12 +157,18 @@ function itemCount(kind, part) {
 
 // --- reading back --------------------------------------------------------------------------
 
-// A recorded part: { kind, id, data, part } (decoded), or undefined when its file is missing.
+const partFile = (id, redacted) => `${id}${redacted ? '.redacted' : ''}.bin`;
+
+// A recorded part: { kind, id, data, part, redacted } (decoded), or undefined when its file is
+// missing. redacted: its credentials were replaced, so `data` is not exactly the bytes of `id`.
 function loadPart(dir, kind, id) {
-  const file = path.join(dir, 'context', `${id}.bin`);
-  if (!fs.existsSync(file)) return undefined;
-  const data = fs.readFileSync(file);
-  return { kind, id, data, part: rc.decodePart(kind, data) };
+  for (const redacted of [false, true]) {
+    const file = path.join(dir, 'context', partFile(id, redacted));
+    if (!fs.existsSync(file)) continue;
+    const data = fs.readFileSync(file);
+    return { kind, id, data, part: rc.decodePart(kind, data), redacted };
+  }
+  return undefined;
 }
 
 // Every string a part carries, for comparing it with what travelled.
@@ -196,10 +213,12 @@ function ruleSummary(r) {
   return `<code>${html(r.full_path)}</code> — ${type}${html(how)}${r.content ? '' : ' — no content sent'}`;
 }
 
-function renderPart(kind, part, { id, bytes }) {
+// redacted: { count, paths } of the credentials replaced in `part`.
+function renderPart(kind, part, { id, bytes, redacted }) {
   const out = [`# ${KIND_LABEL[kind]} sent with a request`, '',
     `Part \`${id}\` (sha256), ${bytes} bytes. Rebuilt from its sources the way Cursor's client builds it; `
       + 'it is what Cursor sent only where this id is one Cursor used (`cursor-context wire compare` checks it against captured traffic).', ''];
+  if (redacted) out.push(redactedNote(redacted), '');
   const section = (title, items, summary) => {
     if (!items || !items.length) return;
     out.push(`## ${title} (${items.length})`, '');
@@ -224,6 +243,10 @@ function renderPart(kind, part, { id, bytes }) {
   return `${out.join('\n').trimEnd()}\n`;
 }
 
+// part: the note is on a part, whose id is the sha256 of the bytes before the replacement.
+const redactedNote = (r, part = true) => `Credentials replaced by \`[redacted]\` in ${r.count} place${r.count === 1 ? '' : 's'} (${r.paths.join(', ')}): `
+  + `the stored copy differs from what was rebuilt there only${part ? '; the id is the sha256 of the bytes before the replacement' : ''}.`;
+
 // For chat.md: one collapsed section under each user message that has context recorded.
 function chatSection(entry, contextDir) {
   if (entry.error) return details('Context sent with this message — not rebuilt', `The rebuild failed: ${html(entry.error)}`);
@@ -231,11 +254,13 @@ function chatSection(entry, contextDir) {
   const lines = rc.PARTS.filter((k) => entry.parts && entry.parts[k]).map((k) => {
     const p = entry.parts[k];
     const kept = (entry.storedByCursor || []).includes(k) ? ' — Cursor kept a copy with this id' : '';
-    return `- [${KIND_LABEL[k]}](${contextDir}/${p.id}.md): ${p.items} items, ${p.bytes} bytes, \`${p.id.slice(0, 12)}\`${kept}`;
+    const redacted = p.redacted ? ` — ${p.redacted.count} credential${p.redacted.count === 1 ? '' : 's'} redacted` : '';
+    return `- [${KIND_LABEL[k]}](${contextDir}/${p.id}.md): ${p.items} items, ${p.bytes} bytes, \`${p.id.slice(0, 12)}\`${kept}${redacted}`;
   });
   const how = `Rebuilt from the rule, skill, agent and MCP files ${lag >= 0 ? `${lag} s after` : 'around'} the message; `
     + 'not verified against the bytes Cursor sent (see `cursor-context wire compare`).';
-  const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)', fenced(JSON.stringify(entry.dynamic, null, 2), 'json'))] : [];
+  const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)',
+    [...(entry.dynamicRedacted ? [redactedNote(entry.dynamicRedacted, false), ''] : []), fenced(JSON.stringify(entry.dynamic, null, 2), 'json')].join('\n'))] : [];
   return details('Context sent with this message (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
 }
 
@@ -247,7 +272,7 @@ function panelCategory(dir, meta) {
   for (const kind of rc.PARTS) {
     const p = entry.parts[kind] && loadPart(dir, kind, entry.parts[kind].id);
     if (!p) continue;
-    const md = renderPart(kind, p.part, { id: p.id, bytes: p.data.length });
+    const md = renderPart(kind, p.part, { id: p.id, bytes: entry.parts[kind].bytes, redacted: entry.parts[kind].redacted });
     items.push({ id: `sent:${kind}`, label: `${KIND_LABEL[kind]} (${entry.parts[kind].items})`, kind: 'sent_context', text: md, estimatedTokens: Math.ceil(md.length / 4), characterCount: md.length });
   }
   return {

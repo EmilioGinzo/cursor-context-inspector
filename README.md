@@ -159,7 +159,7 @@ holds its final state even when Cursor stores it without a newer timestamp:
 | `chats/<chat name>/meta.json` | Name, chat id, model, workspace, message hashes in first-seen order, and `sentContext`: for each of your messages, the context parts sent with it (see below). |
 | `chats/<chat name>/subagents/<subagent name>/` | The same files for each subagent the chat spawned, nested to any depth; its transcript links back to the parent. |
 | `blobs/<sha256>.json` | Each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading). |
-| `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. |
+| `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. `<sha256>.redacted.bin` when it held credentials, replaced (see [Context sent beside the prompt](#context-sent-beside-the-prompt)). |
 | `context/<sha256>.md` | The same part, readable: one collapsed section per rule, skill, subagent or tool. |
 | `index.json` | All recorded chats, newest first, each with its subagent tree. |
 
@@ -243,6 +243,17 @@ under the same id. Things the rebuild cannot know: the order MCP servers
 connected in (Cursor's own servers are put first), team rules, Agent Store
 skills, and plugin database ids, which are taken from a part Cursor kept in its
 database when there is one (`context/plugin-ids.json`).
+
+Credentials are never stored. A git remote URL holds them as git has it
+(`https://user:token@host/...`), and a rule may hold a URL or a token
+(GitHub, GitLab, OpenAI, Anthropic, Slack, AWS, Google formats): they are
+replaced by `[redacted]` (`https://[redacted]@host/...`) in `meta.json`, the
+snapshots, `chat.md` and the parts. A part that held one is stored as
+`context/<sha256>.redacted.bin`: its name keeps the sha256 of the bytes before
+the replacement, the id compared with Cursor's, and `redacted` in its
+`sentContext` entry says how many were replaced and where (`dynamicRedacted`
+for the environment). `wire compare` then reports the part as *= recorded
+except redacted credentials*.
 
 ## CLI
 
@@ -364,6 +375,7 @@ src/turnSteps.cjs     reads Cursor's turn steps and places their thinking on pro
 src/requestContext.cjs  the context parts' wire format (encode, decode)
 src/contextSources.cjs  rebuilds them from rule, skill, agent and MCP files
 src/sentContext.cjs   records them in the history, renders them
+src/redact.cjs        replaces credentials before anything is stored
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
 src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles

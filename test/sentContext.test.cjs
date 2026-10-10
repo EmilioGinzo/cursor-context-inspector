@@ -213,3 +213,53 @@ test('plugin database ids are taken from a part Cursor kept', { skip: !haveCurso
   assert.ok(!(entry.notes || []).some((n) => /plugin database ids/.test(n)));
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'context', 'plugin-ids.json'), 'utf8'))[`tool-${rev}`].pluginId, '7');
 });
+
+test('credentials in URLs and well-known tokens are replaced, an ssh user is not', () => {
+  const { redactText, redactValue } = require('../src/redact.cjs');
+  const token = `ghp_${'a1'.repeat(18)}`;
+  assert.deepStrictEqual(redactText(`https://kat:${token}@github.com/o/r.git`), { text: 'https://[redacted]@github.com/o/r.git', count: 1 });
+  assert.deepStrictEqual(redactText('clone https://user:pa%40ss@host.example/x and http://tok@h/y').text, 'clone https://[redacted]@host.example/x and http://[redacted]@h/y');
+  for (const kept of ['ssh://git@github.com/o/r.git', 'git@github.com:o/r.git', 'https://github.com/o/r.git', 'https://[redacted]@h/p', 'mail me at a@b.c']) {
+    assert.deepStrictEqual(redactText(kept), { text: kept, count: 0 }, kept);
+  }
+  assert.strictEqual(redactText('ssh://git:secret@host/r').text, 'ssh://[redacted]@host/r');
+  assert.strictEqual(redactText(`token ${token}, key AKIA${'A'.repeat(16)}, sk-ant-${'x'.repeat(30)}`).text, 'token [redacted], key [redacted], [redacted]');
+  assert.deepStrictEqual(redactValue({ a: [{ b: `x ${token}` }, 3], c: 'clean' }), { value: { a: [{ b: 'x [redacted]' }, 3], c: 'clean' }, count: 1, paths: ['a[0].b'] });
+});
+
+// Every file under `dir`, recursively.
+const allFiles = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? allFiles(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+
+test('credentials in the context are never stored: the part keeps the sent id and says what was replaced', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const token = `ghp_${'Zq'.repeat(18)}`;
+  cp.spawnSync('git', ['remote', 'add', 'origin', `https://kat:${token}@github.com/o/r.git`], { cwd: ws });
+  write(path.join(ws, '.cursor', 'rules', 'deploy.mdc'), `---\nalwaysApply: true\n---\nPush to https://ci:${token}@git.example.com/r.git\n`);
+  const { db, save } = chatDb(ws);
+  save('c', Date.now(), [{ role: 'user', content: '<user_query>\ngo\n</user_query>' }]);
+  const dir = path.join(root, 'history');
+  const options = { enabled: true, appDir: APP, home };
+  history.recordChat(db, 'c', dir, undefined, { sentContext: options });
+
+  for (const f of allFiles(dir)) assert.ok(!fs.readFileSync(f).includes(token), `no credential in ${path.relative(dir, f)}`);
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  assert.deepStrictEqual(entry.dynamic.git_repos, [{ path: ws, remote_url: 'https://[redacted]@github.com/o/r.git' }]);
+  assert.deepStrictEqual(entry.dynamicRedacted, { count: 1, paths: ['git_repos[0].remote_url'] });
+
+  // The id is the sha256 of the part as rebuilt, credentials included: the one Cursor's is compared with.
+  const sent = rc.encodeParts(sources.buildParts([ws], { appDir: APP, home }).parts);
+  const rules = entry.parts.rules;
+  assert.strictEqual(rules.id, sent.rules.id);
+  assert.strictEqual(rules.redacted.count, 1);
+  assert.match(rules.redacted.paths[0], /^rules\[\d+\]\.content$/);
+  assert.ok(!entry.parts.skills.redacted);
+  assert.ok(!fs.existsSync(path.join(dir, 'context', `${rules.id}.bin`)), 'no file claims to be the sent bytes');
+  const stored = require('../src/sentContext.cjs').loadPart(dir, 'rules', rules.id);
+  assert.strictEqual(stored.redacted, true);
+  assert.ok(stored.part.rules.some((r) => r.content === 'Push to https://[redacted]@git.example.com/r.git'));
+  assert.match(fs.readFileSync(path.join(dir, 'context', `${rules.id}.md`), 'utf8'), /Credentials replaced by `\[redacted\]` in 1 place \(rules\[\d+\]\.content\)/);
+  const md = fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8');
+  assert.match(md, /Rules\]\([^)]*\): \d+ items, \d+ bytes, `[0-9a-f]{12}` — 1 credential redacted/);
+  assert.match(md, /Credentials replaced by `\[redacted\]` in 1 place \(git_repos\[0\]\.remote_url\): the stored copy differs from what was rebuilt there only\./);
+});

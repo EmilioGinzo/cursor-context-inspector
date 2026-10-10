@@ -16,6 +16,7 @@ const { sha256 } = require('./conversation.cjs');
 const { userBlocks } = require('../chatMarkdown.cjs');
 const requestContext = require('../requestContext.cjs');
 const sentContextLib = require('../sentContext.cjs');
+const { redactText, redactValue } = require('../redact.cjs');
 
 const SUMMARY_PREFIX = '[Previous conversation summary]';
 const MIN_LEAF = 24; // shorter wire strings (ids, flags, paths) are too common to look for in the record
@@ -424,8 +425,11 @@ function checkRequestContext(run, rec, add, ctx) {
   }
   const cache = ctx.looseCache;
   for (const l of sources) {
-    if (!isContent(l) || l.text === um || haystack.includes(l.text)) continue;
-    const match = looseMatch(l.text, haystack, cache);
+    if (!isContent(l) || l.text === um) continue;
+    // The record holds the context with its credentials replaced (redact.cjs).
+    const text = redactText(l.text).text;
+    if (haystack.includes(text)) continue;
+    const match = looseMatch(text, haystack, cache);
     if (match === 'none') add('sent-context-not-in-record', 'request-context', { path: l.path, match, text: l.text });
     else add('sent-context-reformatted-in-record', undefined, { path: l.path, match, text: l.text });
   }
@@ -453,12 +457,13 @@ function checkContextParts(run, rec, added, add, ctx, out) {
       add('context-sent-by-reference', 'request-context', { ref: r.ref, id: r.id, bytes: r.bytes, wireBytesKnown: !!wire, inDb: rec.db && rec.db.found ? rec.db.hasBlob(r.id) : undefined });
       continue;
     }
-    (out.contextParts = out.contextParts || []).push({ kind, id: r.id, bytes: r.bytes, recordedId: recorded.id, same: recorded.id === r.id });
+    // Same id with credentials redacted: the record holds the bytes sent, but for those (redact.cjs).
+    (out.contextParts = out.contextParts || []).push({ kind, id: r.id, bytes: r.bytes, recordedId: recorded.id, same: recorded.id === r.id, ...(recorded.redacted ? { redacted: recorded.redacted.count } : {}) });
     if (recorded.id === r.id) continue;
     const mine = rec.part(kind, recorded.id);
     add('context-part-differs', 'request-context', {
       ref: r.ref, id: r.id, bytes: r.bytes, recordedId: recorded.id, recordedBytes: recorded.bytes, rebuiltAfterMs: entry.rebuiltAt - entry.messageAt,
-      wireBytesKnown: !!wire, items: wire && mine ? partDiff(kind, wire.part, mine.part) : undefined,
+      wireBytesKnown: !!wire, items: wire && mine ? partDiff(kind, redactValue(wire.part).value, mine.part) : undefined,
     });
   }
 }

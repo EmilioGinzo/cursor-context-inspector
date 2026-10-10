@@ -551,3 +551,33 @@ test('compare: context parts sent by id are checked against the recorded parts, 
   assert.deepStrictEqual(r.runs[0].findings.find((f) => f.kind === 'client-sent-tool-definitions').names, ['srv-search']);
   assert.match(report.renderComparison(r), /context parts by id: rules != recorded [0-9a-f]{12}, mcps != recorded/);
 });
+
+test('compare: a part recorded with its credentials redacted matches the id sent, except for them', (t) => {
+  const { wire, history } = tmp(t);
+  const rc = require('../src/requestContext.cjs');
+  const token = `ghp_${'Zq'.repeat(18)}`;
+  const secret = { full_path: RULE_PATH, content: `${RULE} Push to https://ci:${token}@git.example.com/r.git` };
+  const sentIds = rc.encodeParts({ rules: { rules: [secret] } });
+  const { clientMsgs, serverMsgs } = turnMessages();
+  clientMsgs[0] = client({ run_request: {
+    conversation_id: CID, conversation_state: { root_prompt_messages_json: ids('sys', 'u0', 'a0') },
+    action: { user_message_action: { user_message: { text: 'list the files' }, request_context: { rules: [secret] } },
+      request_context_parts: { rules_blob_id: Buffer.from(sentIds.rules.id, 'hex'), rules_byte_length: sentIds.rules.bytes } },
+  } });
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', { url: 'https://x/agent.v1.AgentService/Run', started: 1, reqBody: stream(clientMsgs, false), respBody: stream(serverMsgs) });
+  writeRecord(history);
+  // As sentContext.cjs records it: the sent id, the bytes with the credential replaced.
+  const redacted = rc.encodeParts({ rules: { rules: [{ ...secret, content: secret.content.replace(`ci:${token}`, '[redacted]') }] } });
+  fs.mkdirSync(path.join(history, 'context'), { recursive: true });
+  fs.writeFileSync(path.join(history, 'context', `${sentIds.rules.id}.redacted.bin`), redacted.rules.data);
+  const metaFile = path.join(history, 'chats', 'Files', 'meta.json');
+  const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  meta.sentContext = [{ messages: [M.u1.hex], messageAt: 1, rebuiltAt: 2, parts: { rules: { id: sentIds.rules.id, bytes: sentIds.rules.bytes, items: 1, redacted: { count: 1, paths: ['rules[0].content'] } } } }];
+  fs.writeFileSync(metaFile, JSON.stringify(meta));
+
+  const [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  assert.deepStrictEqual(r.runs[0].contextParts.map((c) => [c.kind, c.same, c.redacted]), [['rules', true, 1]]);
+  // The inline copy, credential included, is found in the record once redacted the same way.
+  assert.deepStrictEqual(kinds(r), []);
+  assert.match(report.renderComparison(r), /context parts by id: rules = recorded except redacted credentials/);
+});

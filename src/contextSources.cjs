@@ -712,7 +712,8 @@ function mcpsPart(env, workspacePaths) {
 
 // The small, per-request part of the context (sent inline, never by id), as far as it is on disk:
 // the environment's folders, OS and time zone, and each workspace folder's git repo and remote URL
-// (as git has it: with any credentials it holds). Flags and settings Cursor adds are not rebuilt.
+// (as git has it: with any credentials it holds, which sentContext.cjs redacts before storing).
+// Flags and settings Cursor adds are not rebuilt.
 function dynamicContext(env, workspacePaths) {
   const project = projectDir(env, workspacePaths);
   let timeZone;

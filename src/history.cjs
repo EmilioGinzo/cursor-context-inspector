@@ -136,15 +136,48 @@ function chatDirFor(db, dir, composerId, name = chatName(db, composerId), from =
   return chatDir;
 }
 
+// Two recordings of one state differ only in recordedAt.
+const sameState = (a, b) => JSON.stringify({ ...a, recordedAt: 0 }) === JSON.stringify({ ...b, recordedAt: 0 });
+
 // Never overwrite a snapshot: a run recorded mid-way, or summarized, has several states under
-// one timestamp. A taken name gets `-at<recordedAt>`, not to be read as `-<n>`.
-function newSnapshotFile(chatDir, name) {
-  const file = path.join(chatDir, 'snapshots', `${name}.json`);
-  return fs.existsSync(file) ? path.join(chatDir, 'snapshots', `${name}-at${Date.now()}.json`) : file;
+// one timestamp. A taken name gets `-at<recordedAt>`, and `-at<recordedAt>-<k>` when several
+// states are recorded in one ms; neither is to be read as `-<n>`. A state already recorded
+// under the name is not written again. Returns whether the snapshot was written.
+function writeSnapshot(chatDir, name, snapshot) {
+  const folder = path.join(chatDir, 'snapshots');
+  fs.mkdirSync(folder, { recursive: true });
+  const taken = new RegExp(`^${name}(-at\\d+(-\\d+)?)?\\.json$`);
+  for (const f of fs.readdirSync(folder)) if (taken.test(f) && sameState(readJson(path.join(folder, f), {}), snapshot)) return false;
+  const data = JSON.stringify(snapshot, null, 2);
+  const tmp = path.join(folder, `${name}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, data);
+  try {
+    for (let k = 1; ; k++) {
+      const file = path.join(folder, k === 1 ? `${name}.json` : `${name}-at${snapshot.recordedAt}${k > 2 ? `-${k - 1}` : ''}.json`);
+      try {
+        // A link is created whole, and only where no file is.
+        fs.linkSync(tmp, file);
+        return true;
+      } catch (err) {
+        if (err.code === 'EEXIST') continue;
+        if (!['EPERM', 'ENOTSUP', 'ENOSYS'].includes(err.code)) throw err;
+      }
+      // A filesystem without links.
+      try {
+        fs.writeFileSync(file, data, { flag: 'wx' });
+        return true;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+      }
+    }
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 // Record one chat and the subagents it spawned. Returns the number of new snapshots.
 // options.sentContext: rebuild the context sent with new user messages (sentContext.record).
+// options.clock: the time recordedAt is taken from (Date.now).
 function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (visited.has(composerId)) return 0;
   visited.add(composerId);
@@ -205,15 +238,16 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   // snapshot and latest.json, which mark the update as recorded.
   const summaries = store.summaryCount(composer.conversationState);
   const model = composer.modelConfig && composer.modelConfig.modelName;
-  const earlier = earlierStates(dir, hashes, summaries, latest);
-  for (const { before, state } of earlier) {
-    writeAtomic(newSnapshotFile(chatDir, `${composer.lastUpdatedAt}-${before}`), JSON.stringify({
-      composerId, recordedAt: Date.now(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
-    }, null, 2));
+  const clock = options.clock || Date.now;
+  let written = 0;
+  for (const { before, state } of earlierStates(dir, hashes, summaries, latest)) {
+    written += writeSnapshot(chatDir, `${composer.lastUpdatedAt}-${before}`, {
+      composerId, recordedAt: clock(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
+    });
   }
   const snapshot = {
     composerId,
-    recordedAt: Date.now(),
+    recordedAt: clock(),
     lastUpdatedAt: composer.lastUpdatedAt,
     model,
     totalUsedTokens,
@@ -223,7 +257,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     messages: hashes,
     ...(sent ? { sentContext: sent } : {}),
   };
-  writeAtomic(newSnapshotFile(chatDir, changedAt(composer)), JSON.stringify(snapshot, null, 2));
+  written += writeSnapshot(chatDir, changedAt(composer), snapshot);
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...previous };
@@ -241,7 +275,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     subagentIds: composer.subagentComposerIds || [],
     lastUpdatedAt: composer.lastUpdatedAt,
     totalUsedTokens: snapshot.totalUsedTokens,
-    snapshots: (meta.snapshots || 0) + 1 + earlier.length,
+    snapshots: (meta.snapshots || 0) + written,
   });
   if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
@@ -448,7 +482,7 @@ function unsettled(db, dir, composerId) {
 
 // Record chats changed after `since` and up to `until` (ms), oldest first, at most
 // `limit` of them. Returns { recorded, watermark, more, unsettled } (unsettled: { id: changedAt }).
-function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent } = {}) {
+function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent, clock } = {}) {
   const rows = db.prepare(`
     SELECT id, t FROM (
       SELECT substr(key, 14) AS id, ${CHANGED_AT} AS t
@@ -462,7 +496,7 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
   for (const r of rows) {
     // One unreadable chat must not stop the others (or the backfill) for good.
     try {
-      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent });
+      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent, clock });
       if (unsettled(db, dir, r.id)) pending[r.id] = r.t;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${r.id}:`, err);
@@ -478,12 +512,12 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
 // A chat stuck unsettled (e.g. a blob Cursor never wrote) is given up after
 // `PENDING_MS`; its later changes still reach the recorder by timestamp.
 const PENDING_MS = 86400000;
-function recordPending(db, dir, pending, now, sent) {
+function recordPending(db, dir, pending, now, sent, clock) {
   let recorded = 0;
   const still = {};
   for (const [id, since] of Object.entries(pending)) {
     try {
-      recorded += recordChat(db, id, dir, undefined, { sentContext: sent });
+      recorded += recordChat(db, id, dir, undefined, { sentContext: sent, clock });
       if (now - since < PENDING_MS && unsettled(db, dir, id)) still[id] = since;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${id}:`, err);
@@ -519,10 +553,11 @@ const RESCAN = 1;
 // on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
 // Returns `backfilling` while older chats remain.
 // sentContext: options for sentContext.record ({ enabled, appDir }); rebuilt once per tick.
-function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent } = {}) {
+// clock: the time now (Date.now).
+function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
-  const now = Date.now();
+  const now = clock();
   const state = readJson(stateFile, { watermark: now, layout: LAYOUT });
   // Before 0.10 the first run went back only 7 days and never further.
   if (!state.backfill || state.rescan !== RESCAN) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
@@ -533,13 +568,13 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   if (relayout) rebuildTranscripts(db, dir);
   const before = JSON.stringify([state.backfill, state.pending || {}]);
   const sentOptions = sent && { ...sent, cache: new Map() };
-  const again = recordPending(db, dir, state.pending || {}, now, sentOptions);
-  const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions });
+  const again = recordPending(db, dir, state.pending || {}, now, sentOptions, clock);
+  const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock });
   let recorded = again.recorded + result.recorded;
   const pending = { ...again.pending };
   for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
   if (!state.backfill.done) {
-    const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions });
+    const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock });
     recorded += older.recorded;
     // Only recent chats wait to settle: an old one stuck unsettled would be retried for nothing.
     for (const [id, t] of Object.entries(older.unsettled)) if (now - t < PENDING_MS) pending[id] = pending[id] || now;

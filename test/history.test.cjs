@@ -441,6 +441,32 @@ test('a state recorded under a send time is not overwritten when the run is summ
   assert.strictEqual(new Set(states).size, 7, 'every state kept');
 });
 
+test('states recorded under one name in the same ms are all kept, and a state recorded again is not', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  const clock = () => 2000;
+  const next = { role: 'user', content: 'next question' };
+  const second = { role: 'assistant', content: [{ type: 'text', text: 'second answer' }] };
+  save(1000, [sys, first], { status: 'generating' });
+  history.tick(db, dir, { clock });
+  // Each update below is new under the send time, and recorded in the same ms.
+  save(1000, [sys, first, answer], { status: 'generating' });
+  history.tick(db, dir, { clock });
+  save(1000, [sys, summary], { status: 'generating', summaries: 1 });
+  history.tick(db, dir, { clock });
+  save(1000, [sys, summary, next, second], { status: 'completed', summaries: 1 });
+  history.tick(db, dir, { clock });
+  const chat = path.join(dir, 'chats', 'History chat');
+  const read = () => snapshots(dir).map((f) => [f, JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', f), 'utf8')).messages.length]);
+  const all = [['1000-3.json', 3], ['1000-at2000-2.json', 2], ['1000-at2000-3.json', 4], ['1000-at2000.json', 3], ['1000.json', 2]];
+  assert.deepStrictEqual(read(), all);
+  // A recorder stopped before latest.json records the same state again.
+  fs.rmSync(path.join(chat, 'latest.json'));
+  history.recordChat(db, 'chat-1', dir, undefined, { clock: () => 3000 });
+  assert.deepStrictEqual(read(), all, 'no duplicate');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8')).snapshots, all.length);
+});
+
 test('the readable thinking from Cursor\'s turn steps is recorded and shown where the model thought it', () => {
   const { db, save, dir } = setup();
   const user = { role: 'user', content: [{ type: 'text', text: '<user_query>\nfix the bug\n</user_query>' }] };

@@ -4,7 +4,9 @@
 // cursor-context wire show <flow> [--raw] [--json] [--clip N] [--schema file.json | --app dir] [--root dir]
 // cursor-context wire conv    [<conversation id prefix>] [--day D] [--json] [--clip N | --full]
 // cursor-context wire compare [<chat name | composerId prefix>] [--day D] [--json] [--clip N | --full]
-//                             [--history dir] [--db state.vscdb | --no-db]
+//                             [--history dir] [--db state.vscdb | --no-db] [--record-now]
+// --record-now compares against a fresh record: the plugin's own recordChat run now, on Cursor's DB,
+// into a temporary history folder (the real history is not touched).
 // <flow> is a flow directory, or its name (e.g. 101500-00002-aiserver.v1.AiService_ServerTime, or a
 // unique part of it). An index into the `wire ls` listing (with the same --day/--grep) also works,
 // but shifts while the proxy is recording.
@@ -24,9 +26,10 @@ const USAGE = `usage:
   cursor-context wire conv [<conversation id prefix>] [--day D] [--json] [--clip N | --full]
       agent conversations rebuilt from the Run/RunSSE/BidiAppend flows: every client and server message
   cursor-context wire compare [<chat name | composerId prefix>] [--day D] [--json] [--clip N | --full]
-                              [--history dir] [--db state.vscdb | --no-db]
+                              [--history dir] [--db state.vscdb | --no-db] [--record-now]
       the rebuilt conversations against what the plugin recorded (default ~/.cursor-context-history
-      and Cursor's state.vscdb, read-only)
+      and Cursor's state.vscdb, read-only); --record-now records them afresh, with the plugin's own
+      recorder, into a temporary folder and compares against that
   captures are read from --root, $CURSOR_WIRE_DIR or ~/.cursor-wire;
   the schema is extracted from Cursor at --app (cached), or read from --schema (cursor-wire-schema --out)`;
 
@@ -125,9 +128,17 @@ async function run(argv, out = process.stdout) {
       if (!list.length) print('no agent conversations in the captures');
       return 0;
     }
-    const historyDir = opts.history || require('../history.cjs').defaultHistoryDir();
+    let historyDir = opts.history || require('../history.cjs').defaultHistoryDir();
     const db = opts['no-db'] ? null : openDb(opts.db);
+    let fresh;
     try {
+      if (opts['record-now']) {
+        if (!db) throw new Error('--record-now needs Cursor\'s DB');
+        const history = require('../history.cjs');
+        fresh = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cursor-context-record-'));
+        for (const c of rebuilt.conversations) history.recordChat(db, c.conversationId, fresh);
+        historyDir = fresh;
+      }
       const results = compareLib.compare({ conversations: rebuilt.conversations, historyDir, db, ref });
       if (opts.json) {
         print(JSON.stringify({ schema: note, historyDir, db: !!db, comparisons: results, unassigned: rebuilt.unassigned.map((r) => r.flow), flowErrors: rebuilt.flowErrors }, jsonReplacer, 2));
@@ -139,6 +150,7 @@ async function run(argv, out = process.stdout) {
       return 0;
     } finally {
       if (db) db.close();
+      if (fresh) fs.rmSync(fresh, { recursive: true, force: true });
     }
   }
   process.stderr.write(`${USAGE}\n`);

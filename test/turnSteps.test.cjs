@@ -19,6 +19,8 @@ test('turnHashes reads the turn blob ids (field 8) of the conversation state', (
   const state = Buffer.concat([pb.len(1, Buffer.alloc(32, 9)), pb.len(8, a), pb.v(17, 1), pb.len(8, b)]);
   assert.deepStrictEqual(turnHashes(`~${state.toString('base64')}`), [a.toString('hex'), b.toString('hex')]);
   assert.deepStrictEqual(turnHashes(undefined), []);
+  // Unparseable (a group wire type, a truncated length): no turns, rather than a failed recording.
+  assert.deepStrictEqual(turnHashes(`~${Buffer.from([0x0b, 0x42, 0x20, 1]).toString('base64')}`), []);
 });
 
 test('thinking goes to the message of the text or tool call after it, on its reasoning part', () => {

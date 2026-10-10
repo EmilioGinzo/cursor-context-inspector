@@ -60,9 +60,14 @@ function getBytes(db, key) {
   return typeof row.value === 'string' ? Buffer.from(row.value, 'utf8') : Buffer.from(row.value);
 }
 
+// A state this cannot parse has no turns: the recorder keeps going (it runs after the snapshot is written).
 function turnHashes(conversationState) {
   if (typeof conversationState !== 'string' || !conversationState.startsWith('~')) return [];
-  return fields(Buffer.from(conversationState.slice(1), 'base64')).filter((f) => f.no === 8 && Buffer.isBuffer(f.value) && f.value.length === 32).map((f) => f.value.toString('hex'));
+  try {
+    return fields(Buffer.from(conversationState.slice(1), 'base64')).filter((f) => f.no === 8 && Buffer.isBuffer(f.value) && f.value.length === 32).map((f) => f.value.toString('hex'));
+  } catch {
+    return [];
+  }
 }
 
 // One step: { hash, kind: 'thinking' | 'text' | 'tool-call' | 'missing', text?, durationMs?, data? }.

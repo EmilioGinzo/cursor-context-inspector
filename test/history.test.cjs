@@ -266,6 +266,25 @@ test('a chat recorded again by an older window is merged into its named folder',
   assert.strictEqual(history.tick(db, dir).migrated, 0, 'nothing left to merge');
 });
 
+test('a snapshot an older window recorded under a taken name is kept when the folders are merged', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys]);
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const recorded = JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', '1000.json'), 'utf8'));
+  const old = path.join(dir, 'chats', 'chat-1');
+  fs.mkdirSync(path.join(old, 'snapshots'), { recursive: true });
+  // The same state recorded at another time, and another state under the same name.
+  fs.writeFileSync(path.join(old, 'snapshots', '1000-at1.json'), JSON.stringify({ ...recorded, recordedAt: 1 }));
+  fs.writeFileSync(path.join(old, 'snapshots', '1000.json'), JSON.stringify({ ...recorded, recordedAt: 1500, messages: ['other'] }));
+  fs.writeFileSync(path.join(old, 'meta.json'), JSON.stringify({ composerId: 'chat-1', seen: [] }));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ watermark: 5000, layout: 3 }));
+  assert.strictEqual(history.tick(db, dir).migrated, 1);
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats')), ['History chat']);
+  assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), ['1000-at1500.json', '1000.json']);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'snapshots', '1000-at1500.json'), 'utf8')).messages, ['other']);
+});
+
 test('older chats are caught up in batches, also after an earlier 7-day backfill', () => {
   const { db, save, dir } = setup();
   for (let i = 1; i <= 5; i++) save(i * 1000, [sys, { role: 'user', content: `question ${i}` }], { id: `chat-${i}`, name: `Chat ${i}` });

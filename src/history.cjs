@@ -108,7 +108,8 @@ function placeChat(container, composerId, name, from) {
 }
 
 // Moves into `into` whatever `from` has that it lacks, folder by folder, then removes `from`.
-// A placeholder meta.json is replaced; recorded ones join the messages they saw.
+// A placeholder meta.json is replaced; recorded ones join the messages they saw. Snapshots
+// join as if recorded again: a state under a taken name is kept beside it, not twice.
 function mergeInto(from, into) {
   for (const entry of fs.readdirSync(from)) {
     const src = path.join(from, entry);
@@ -118,6 +119,8 @@ function mergeInto(from, into) {
       const other = readJson(src, {});
       if (!kept.seen) fs.renameSync(src, dst);
       else if (other.seen) writeAtomic(dst, JSON.stringify({ ...kept, seen: [...new Set([...kept.seen, ...other.seen])] }, null, 2));
+    } else if (path.basename(into) === 'snapshots' && entry.endsWith('.json')) {
+      writeSnapshot(path.dirname(into), entry.replace(/(-at\d+(-\d+)?)?\.json$/, ''), readJson(src, undefined), fs.readFileSync(src));
     } else if (!fs.existsSync(dst)) fs.renameSync(src, dst);
     else if (fs.statSync(src).isDirectory() && fs.statSync(dst).isDirectory()) mergeInto(src, dst);
   }
@@ -142,18 +145,23 @@ const sameState = (a, b) => JSON.stringify({ ...a, recordedAt: 0 }) === JSON.str
 // Never overwrite a snapshot: a run recorded mid-way, or summarized, has several states under
 // one timestamp. A taken name gets `-at<recordedAt>`, and `-at<recordedAt>-<k>` when several
 // states are recorded in one ms; neither is to be read as `-<n>`. A state already recorded
-// under the name is not written again. Returns whether the snapshot was written.
-function writeSnapshot(chatDir, name, snapshot) {
+// under the name is not written again. Returns whether the snapshot was written. `data`: the
+// file's bytes, for a snapshot moved as it is (`snapshot` undefined when unreadable).
+function writeSnapshot(chatDir, name, snapshot, data = JSON.stringify(snapshot, null, 2)) {
   const folder = path.join(chatDir, 'snapshots');
   fs.mkdirSync(folder, { recursive: true });
   const taken = new RegExp(`^${name}(-at\\d+(-\\d+)?)?\\.json$`);
-  for (const f of fs.readdirSync(folder)) if (taken.test(f) && sameState(readJson(path.join(folder, f), {}), snapshot)) return false;
-  const data = JSON.stringify(snapshot, null, 2);
+  const recorded = (file) => {
+    const old = readJson(file, undefined);
+    return old && snapshot ? sameState(old, snapshot) : fs.readFileSync(file).equals(Buffer.from(data));
+  };
+  for (const f of fs.readdirSync(folder)) if (taken.test(f) && recorded(path.join(folder, f))) return false;
+  const at = (snapshot && snapshot.recordedAt) ?? 0;
   const tmp = path.join(folder, `${name}.${process.pid}.tmp`);
   fs.writeFileSync(tmp, data);
   try {
     for (let k = 1; ; k++) {
-      const file = path.join(folder, k === 1 ? `${name}.json` : `${name}-at${snapshot.recordedAt}${k > 2 ? `-${k - 1}` : ''}.json`);
+      const file = path.join(folder, k === 1 ? `${name}.json` : `${name}-at${at}${k > 2 ? `-${k - 1}` : ''}.json`);
       try {
         // A link is created whole, and only where no file is.
         fs.linkSync(tmp, file);

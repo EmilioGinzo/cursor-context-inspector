@@ -113,10 +113,23 @@ function splitEnvelopes(body, protocol, encoding) {
   return frames;
 }
 
+// Whether `body` walks as a chain of Connect envelopes (flags 0-3, lengths that fit; the last may be cut).
+function looksEnveloped(body) {
+  let pos = 0;
+  while (pos + 5 <= body.length) {
+    if (body[pos] > 3) return false;
+    pos += 5 + body.readUInt32BE(pos + 1);
+  }
+  return body.length > 0 && (pos === body.length || pos > body.length);
+}
+
 // headers: [[name, value], ...] of the side the body belongs to (request or response).
 function splitBody(body, headers) {
   body = body || Buffer.alloc(0);
-  const type = classify(header(headers, 'content-type'));
+  let type = classify(header(headers, 'content-type'));
+  // Cursor's RunSSE answers with content-type text/event-stream, but the body is Connect
+  // streaming envelopes (compressed per connect-content-encoding). Real SSE text stays raw.
+  if (type.contentType === 'text/event-stream' && looksEnveloped(body)) type = { protocol: 'connect-stream', codec: 'proto', declaredContentType: type.contentType };
   const result = { ...type, size: body.length, frames: [] };
   if (!body.length) return result;
 
@@ -145,4 +158,4 @@ function splitBody(body, headers) {
   return result;
 }
 
-module.exports = { header, classify, decompress, splitBody };
+module.exports = { header, classify, decompress, splitBody, looksEnveloped };

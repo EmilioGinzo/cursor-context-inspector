@@ -385,3 +385,16 @@ test('wire CLI: ls, show by index with --raw/--json/--clip', async () => {
   await assert.rejects(capture(['show', '-0000']), /matches 2 flows/);
   await assert.rejects(capture(['show', '9']), /no flow #9/);
 });
+
+test('a text/event-stream body made of Connect envelopes splits as connect-stream; SSE text stays raw', () => {
+  const headers = [['content-type', 'text/event-stream'], ['connect-content-encoding', 'gzip']];
+  const msg = pb.msg(pb.len(1, 'hi'));
+  const body = Buffer.concat([pb.envelope(0, Buffer.from([0x0a, 0x00])), pb.envelope(1, zlib.gzipSync(msg)), pb.envelope(2, Buffer.from('{}'))]);
+  const split = frames.splitBody(body, headers);
+  assert.strictEqual(split.protocol, 'connect-stream');
+  assert.strictEqual(split.declaredContentType, 'text/event-stream');
+  assert.deepStrictEqual(split.frames.map((f) => [f.compressed, !!f.endStream]), [[false, false], [true, false], [false, true]]);
+  assert.ok(split.frames[1].payload.equals(msg));
+  const sse = frames.splitBody(Buffer.from('data: {"a":1}\n\n'), headers);
+  assert.strictEqual(sse.protocol, 'raw');
+});

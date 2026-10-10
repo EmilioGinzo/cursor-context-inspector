@@ -205,6 +205,14 @@ test('merges bundles, preferring the copy that resolves', () => {
   assert.deepStrictEqual(s.unresolved, []);
 });
 
+test('reports fields that resolved copies define differently', () => {
+  const a = 'var C={};B=C.makeMessageType("pkg.v1.O",()=>[]),A=C.makeMessageType("pkg.v1.Msg",()=>[{no:1,name:"o",kind:"message",T:B}]);';
+  const b = 'var C={};B=C.makeMessageType("pkg.v1.P",()=>[]),A=C.makeMessageType("pkg.v1.Msg",()=>[{no:1,name:"o",kind:"message",T:B},{no:2,name:"new",kind:"scalar",T:9}]);';
+  const s = extractSchema(makeApp({ 'out/a.js': a, 'out/b.js': b }));
+  assert.strictEqual(s.messages['pkg.v1.Msg'].fields.length, 2, 'the copy with more fields still wins');
+  assert.deepStrictEqual(s.unresolved, [{ file: 'out/b.js', type: 'pkg.v1.Msg', field: 'o', ref: 'conflicts with out/a.js' }]);
+});
+
 test('skips node_modules and files without protobuf code', () => {
   const s = extractSchema(makeApp({
     'node_modules/dep/index.js': 'X=C.makeMessageType("dep.Msg",()=>[]);',

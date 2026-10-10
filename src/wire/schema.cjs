@@ -25,7 +25,8 @@
 // `unresolved` instead of being guessed; its field keeps T: null (and, for
 // compact classes, kind: null, since only the target tells message from enum).
 // When bundles disagree, the copy with fewer unresolved refs wins, then the
-// one with more fields (on Cursor 3.22 every resolved copy agrees).
+// one with more fields; a field that two resolved copies define differently
+// is reported in `unresolved` too (on Cursor 3.22 every resolved copy agrees).
 //
 // Enum value names are kept as the bundle registers them with protobuf-es:
 // the full proto names (LINT_SEVERITY_ERROR), not the stripped localName.
@@ -750,6 +751,14 @@ function better(a, b) {
   return a.size > b.size;
 }
 
+// Fields both copies define under the same number but with a different name
+// or type: a resolution went wrong in one of them (or Cursor changed a field).
+function conflictingFields(a, b) {
+  const key = (f) => JSON.stringify([f.name, f.kind, f.T, f.K, f.V, f.repeated]);
+  const other = new Map(b.map((f) => [f.no, key(f)]));
+  return a.filter((f) => other.has(f.no) && other.get(f.no) !== key(f)).map((f) => f.name);
+}
+
 function extractSchema(appDir = DEFAULT_APP_DIR) {
   const files = [];
   for (const abs of listJsFiles(appDir).sort()) {
@@ -768,6 +777,15 @@ function extractSchema(appDir = DEFAULT_APP_DIR) {
     const cur = map.get(name);
     if (!cur || better(cand, cur)) map.set(name, cand);
   };
+  const conflicts = new Map(); // type name -> first resolved copy seen
+  const checkConflict = (name, file, fields, unresolved) => {
+    if (unresolved.length) return;
+    const first = conflicts.get(name);
+    if (!first) { conflicts.set(name, { file, fields }); return; }
+    for (const field of conflictingFields(fields, first.fields)) {
+      unresolvedTop.push({ file, type: name, field, ref: `conflicts with ${first.file}` });
+    }
+  };
 
   for (const rec of files) {
     for (const def of rec.messages) {
@@ -777,6 +795,7 @@ function extractSchema(appDir = DEFAULT_APP_DIR) {
       }
       const unresolved = [];
       const fields = buildFields(resolver, rec, def, unresolved);
+      checkConflict(def.typeName, rec.file, fields, unresolved);
       offer(pickedMessages, def.typeName, { value: { fields }, unresolved, size: fields.length });
     }
     for (const def of rec.enums) {
@@ -795,7 +814,8 @@ function extractSchema(appDir = DEFAULT_APP_DIR) {
 
   const sorted = (map) => Object.fromEntries([...map.keys()].sort().map((k) => [k, map.get(k).value]));
   const unresolved = [...pickedMessages.values(), ...pickedServices.values()].flatMap((c) => c.unresolved);
-  // Definitions whose package could not be found (type is the bare name).
+  // Definitions whose package could not be found (type is the bare name), and
+  // fields that resolved copies in different bundles disagree on.
   for (const u of unresolvedTop) unresolved.push(u);
 
   return {

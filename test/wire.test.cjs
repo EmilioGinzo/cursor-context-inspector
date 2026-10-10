@@ -437,3 +437,16 @@ test('the compressed flag of an event-stream envelope follows connect-content-en
   const br = frames.splitBody(pb.envelope(1, zlib.brotliCompressSync(msg)), [['content-type', 'text/event-stream'], ['connect-content-encoding', 'br']]);
   assert.ok(br.frames[0].payload.equals(msg));
 });
+
+test('envelope sniffing only applies to text/event-stream; an error end-stream under that label still parses', () => {
+  const env = Buffer.concat([pb.envelope(0, pb.msg(pb.len(1, 'a'))), pb.envelope(2, Buffer.from('{}'))]);
+  for (const ct of ['application/octet-stream', 'text/plain', undefined]) {
+    assert.strictEqual(frames.splitBody(env, ct ? [['content-type', ct]] : []).protocol, 'raw', String(ct));
+  }
+  const end = zlib.gzipSync(JSON.stringify({ error: { code: 'unavailable', message: 'down' } }));
+  const split = frames.splitBody(Buffer.concat([pb.envelope(0, pb.msg(pb.len(1, 'a'))), pb.envelope(3, end)]), [['content-type', 'text/event-stream'], ['connect-content-encoding', 'gzip']]);
+  assert.strictEqual(split.protocol, 'connect-stream');
+  assert.strictEqual(split.truncated, false);
+  assert.deepStrictEqual([split.frames[1].compressed, split.frames[1].endStream], [true, true]);
+  assert.strictEqual(split.frames[1].json.error.code, 'unavailable');
+});

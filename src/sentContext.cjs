@@ -249,7 +249,7 @@ const redactedNote = (r, part = true) => `Credentials replaced by \`[redacted]\`
 
 // For chat.md: one collapsed section under each user message that has context recorded.
 function chatSection(entry, contextDir) {
-  if (entry.error) return details('Context sent with this message — not rebuilt', `The rebuild failed: ${html(entry.error)}`);
+  if (entry.error) return details('Context sent with this message — could not be rebuilt', `The rebuild failed: ${html(entry.error)}`);
   const lag = Math.round((entry.rebuiltAt - entry.messageAt) / 1000);
   const lines = rc.PARTS.filter((k) => entry.parts && entry.parts[k]).map((k) => {
     const p = entry.parts[k];
@@ -261,7 +261,7 @@ function chatSection(entry, contextDir) {
     + 'not verified against the bytes Cursor sent (see `cursor-context wire compare`).';
   const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)',
     [...(entry.dynamicRedacted ? [redactedNote(entry.dynamicRedacted, false), ''] : []), fenced(JSON.stringify(entry.dynamic, null, 2), 'json')].join('\n'))] : [];
-  return details('Context sent with this message (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
+  return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
 }
 
 // For the inspector panel: the latest recorded context of a chat, as a category of items.
@@ -276,7 +276,7 @@ function panelCategory(dir, meta) {
     items.push({ id: `sent:${kind}`, label: `${KIND_LABEL[kind]} (${entry.parts[kind].items})`, kind: 'sent_context', text: md, estimatedTokens: Math.ceil(md.length / 4), characterCount: md.length });
   }
   return {
-    id: 'sent_context', label: 'Sent with the request, not in the prompt', estimatedTokens: 0, source: 'history',
+    id: 'sent_context', label: 'Sent with the request, rebuilt (not in the prompt)', estimatedTokens: 0, source: 'history',
     note: `Rebuilt from their sources for the message at ${new Date(entry.messageAt).toISOString()}; not part of Cursor's context usage.`, items,
   };
 }

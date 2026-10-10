@@ -174,7 +174,7 @@ test('the recorder keeps the context sent with each new user message, once, and 
   assert.deepStrictEqual(snap.sentContext.messages, [hashOf(q2)]);
 
   const md = fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'chat.md'), 'utf8');
-  const sections = md.split('<details><summary>Context sent with this message (not in the prompt)</summary>');
+  const sections = md.split('<details><summary>Context sent with this message, rebuilt (not in the prompt)</summary>');
   assert.strictEqual(sections.length, 3, 'one collapsed section per user message');
   assert.ok(md.indexOf('first') < md.indexOf(sections[1].slice(0, 40)));
   assert.ok(md.includes(`](../../context/${first.parts.rules.id}.md): 6 items`));

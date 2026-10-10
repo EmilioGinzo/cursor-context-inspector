@@ -233,7 +233,7 @@ parent folders (and nested ones in git repositories), the skill folders
 tool snapshots Cursor writes under `~/.cursor/projects/<workspace>/mcps`. It
 uses Cursor's own ripgrep and frontmatter parser, so the bytes come out the
 same when the files have not changed; the panel shows them as **Sent with the
-request, not in the prompt**. Only messages the recorder sees within 10 minutes
+request, rebuilt (not in the prompt)**. Only messages the recorder sees within 10 minutes
 are matched with a rebuild (older chats get none: the files may have changed).
 
 A rebuilt part is what Cursor sent only when their sha256 match.
@@ -242,7 +242,10 @@ part; `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
 under the same id. Things the rebuild cannot know: the order MCP servers
 connected in (Cursor's own servers are put first), team rules, Agent Store
 skills, and plugin database ids, which are taken from a part Cursor kept in its
-database when there is one (`context/plugin-ids.json`).
+database when there is one (`context/plugin-ids.json`). Nor the order of a rule
+edited while Cursor runs (Cursor moves it to the end of its list), or files
+`.cursorignore` excludes. When ripgrep's runs list rule files in different
+orders, the most frequent is taken and a note in `sentContext` says so.
 
 Credentials are never stored. A git remote URL holds them as git has it
 (`https://user:token@host/...`), and a rule may hold a URL or a token

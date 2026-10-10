@@ -18,7 +18,9 @@
 // Not reproducible from disk, so possibly different from what Cursor sent: plugin and marketplace
 // database ids (only Cursor's server knows them; the caller may pass ones found in parts Cursor
 // kept, see sentContext.cjs), the order of MCP servers (the order they connected in), team rules,
-// Agent Store skills, and anything that changed between the send and the rebuild.
+// Agent Store skills, and anything that changed between the send and the rebuild. Nor the order of a
+// rule edited while Cursor ran: Cursor keeps its list and moves a changed rule to its end
+// (LocalCursorRulesService.reloadAtPath). Files .cursorignore excludes are not left out here.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -91,7 +93,8 @@ function walk(root, include, containmentRoot) {
 
 // Cursor's "ripwalk": its bundled ripgrep listing files, in ripgrep's order. Returns relative paths,
 // or undefined when ripgrep is not available. Ripgrep walks with two threads, so the order can vary
-// from run to run (Cursor lists once and keeps that order): the most frequent of a few runs is taken.
+// from run to run (Cursor lists once and keeps that order): the most frequent of a few runs is taken,
+// a guess only the part's sha256 can confirm. When the runs disagreed, a note says so.
 const RIPWALK_RUNS = 5;
 
 function ripwalk(env, { root, includeGlobs = [], excludeGlobs = [], follow = false }) {
@@ -107,8 +110,9 @@ function ripwalk(env, { root, includeGlobs = [], excludeGlobs = [], follow = fal
     seen.set(r.stdout, (seen.get(r.stdout) || 0) + 1);
     if (seen.size === 1 && i >= 1 && r.stdout.split('\n').length <= 2) break; // one file or none: no order to vote on
   }
-  const best = [...seen].sort((a, b) => b[1] - a[1])[0][0];
-  return best.split('\n').filter(Boolean);
+  const ranked = [...seen].sort((a, b) => b[1] - a[1]);
+  if (ranked.length > 1) env.notes.push(`ripgrep listed ${root} in ${ranked.length} orders over ${RIPWALK_RUNS} runs: the most frequent (${ranked[0][1]}) was taken`);
+  return ranked[0][0].split('\n').filter(Boolean);
 }
 
 function gitRoot(dir) {
@@ -763,7 +767,6 @@ function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorData
 // context (see dynamicContext), plus notes on what may differ.
 function buildParts(workspacePaths, options = {}) {
   const env = options.env || environment(options);
-  const notes = [...env.notes];
   const parts = {};
   const local = env.matter ? localSkills(env, workspacePaths) : { rules: [], skills: [] };
   let allSkills = [];
@@ -775,6 +778,8 @@ function buildParts(workspacePaths, options = {}) {
   parts.rules = rulesPart(env, workspacePaths, local, allSkills);
   parts.subagents = subagentsPart(env, workspacePaths);
   parts.mcps = mcpsPart(env, workspacePaths);
+  // After the walks: they add notes of their own.
+  const notes = [...new Set(env.notes)];
   let dynamic;
   try {
     dynamic = dynamicContext(env, workspacePaths);

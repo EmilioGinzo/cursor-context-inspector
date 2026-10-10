@@ -30,7 +30,6 @@ const RUN_RPCS = new Set(['Run', 'RunSSE', 'RunPoll']);
 
 const hex = (b64) => Buffer.from(b64 || '', 'base64').toString('hex');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
-const oneof = (msg, names) => names.find((n) => msg && msg[n] !== undefined);
 
 // The member set in a decoded oneof-only message ({ shell_args: {...} } -> ['shell_args', {...}]).
 function only(msg, skip = []) {

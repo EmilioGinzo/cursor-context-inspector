@@ -441,3 +441,54 @@ test('the agent schema fixture matches the installed Cursor', (t) => {
   if (!full.cursor || full.cursor.version !== schema.cursor.version.replace(/ \(subset for tests\)$/, '')) return t.skip('another Cursor version');
   assert.deepStrictEqual(prune(full).messages, schema.messages);
 });
+
+test('compare: thinking recorded from Cursor\'s turn steps counts on the message it is placed on', (t) => {
+  const { wire, history } = tmp(t);
+  writeRunFlow(wire);
+  const a1 = Buffer.from(JSON.stringify({ ...M.a1.message, content: [{ type: 'redacted-reasoning', data: 'opaque' }, M.a1.message.content[1]] }));
+  writeRecord(history, { edit: { a1 } });
+  const thinkingFile = path.join(history, 'chats', 'Files', 'thinking.json');
+  const place = (message) => fs.writeFileSync(thinkingFile, JSON.stringify([{ step: 'ab'.repeat(32), turn: 'cd'.repeat(32), text: 'Let me look.', message, part: 0 }]));
+
+  place(M.a1.hex);
+  let [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  assert.ok(!kinds(r).includes('streamed-thinking-not-recorded'), kinds(r).join());
+  assert.strictEqual(verdict(r, 'agent-text'), 'holds');
+
+  // On a message of another run: recorded, but not where the model thought it.
+  place(M.a0.hex);
+  [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  const f = r.runs[0].findings.find((x) => x.kind === 'streamed-thinking-not-recorded');
+  assert.deepStrictEqual([f.recordedAs, f.recordedOnAnotherMessage], [['redacted-reasoning'], true]);
+});
+
+test('compare: a read\'s path the model gets in the call, not the result, is no missing output', (t) => {
+  const { wire, history } = tmp(t);
+  const file = '/repo/src/components/very-long-component-name.tsx';
+  const content = 'export const a = 1;\nexport const b = 2;\nexport const c = 3;';
+  const a1 = blob({ role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'tc5', toolName: 'Read', args: { path: file } }] });
+  // As the server builds it for the model: the content, line-numbered, without the path.
+  const t1 = blob({ role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tc5', toolName: 'Read', result: content.split('\n').map((l, i) => `${i + 1}|${l}`).join('\n') }] });
+  Object.assign(M, { r1: a1, r2: t1 });
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', {
+    url: 'https://x/agent.v1.AgentService/Run', started: 1,
+    reqBody: stream([
+      client({ run_request: { conversation_id: CID, conversation_state: { root_prompt_messages_json: ids('sys', 'u0', 'a0') }, action: { user_message_action: { user_message: { text: 'hello' } } } } }),
+      client({ exec_client_message: { id: 4, read_result: { success: { path: file, content, total_lines: 3 } } } }),
+    ], false),
+    respBody: stream([
+      server({ exec_server_message: { id: 4, read_args: { path: file, tool_call_id: 'tc5' } } }),
+      ...['r1', 'r2'].map((n, i) => server({ kv_server_message: { id: i + 1, set_blob_args: { blob_id: M[n].id, blob_data: M[n].data } } })),
+      server({ conversation_checkpoint_update: { root_prompt_messages_json: ids('sys', 'u0', 'a0', 'r1', 'r2') } }),
+    ]),
+  });
+  const all = ['sys', 'u0', 'a0', 'r1', 'r2'];
+  writeRecord(history, { seen: all, snapshots: [all.slice(0, 3), all] });
+  const [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  const f = r.runs[0].findings;
+  assert.deepStrictEqual(f.filter((x) => /^tool-output/.test(x.kind)).map((x) => [x.kind, x.path, x.match]), [
+    ['tool-output-in-recorded-call-args', 'success.path', 'call-args'],
+    ['tool-output-reformatted-in-record', 'success.content', 'lines'],
+  ]);
+  assert.strictEqual(verdict(r, 'tool-calls'), 'holds');
+});

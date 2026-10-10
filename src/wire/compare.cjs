@@ -96,7 +96,9 @@ function loadRecord(historyDir, chat, db) {
     blobs.set(hash, b);
     return b;
   };
-  const rec = { dir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), blob };
+  // thinking.json: the readable thinking from Cursor's turn steps, placed on recorded messages.
+  const thinking = readJson(path.join(dir, 'thinking.json'), []);
+  const rec = { dir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), thinking, blob };
   if (db) rec.db = dbSide(db, meta.composerId);
   return rec;
 }
@@ -278,7 +280,7 @@ function compareRun(run, rec, ctx) {
   out.added = addedMsgs.map(({ id, m }) => ({ id, role: m.role, parts: parts(m).map((p) => p.type) }));
 
   checkUserText(run, addedMsgs, add, ctx);
-  checkAgentStream(run, addedMsgs, add);
+  checkAgentStream(run, addedMsgs, add, rec);
   checkTools(run, addedMsgs, add);
   checkRequestContext(run, rec, add, ctx);
   checkSummary(run, before, after, message, add, out);
@@ -306,12 +308,15 @@ function checkUserText(run, addedMsgs, add, ctx) {
   add('chat-md-user-text-differs', 'user-text', { wireText: um.text, chatMd: shown.map((s) => s.text), recordedVerbatim: !!inRaw, diff: diffText(um.text, shown[0].text) });
 }
 
-function checkAgentStream(run, addedMsgs, add) {
+function checkAgentStream(run, addedMsgs, add, rec) {
   const assistant = addedMsgs.filter((x) => x.m.role === 'assistant').flatMap((x) => parts(x.m).map((p) => ({ id: x.id, p })));
   const texts = assistant.filter((a) => a.p.type === 'text').map((a) => a.p.text || '');
-  const thoughts = assistant.filter((a) => a.p.type === 'reasoning' || a.p.type === 'redacted-reasoning').map((a) => a.p.text || '');
+  // Thinking the prompt keeps only encrypted is recorded from Cursor's turn steps, on its message.
+  const addedIds = new Set(addedMsgs.map((x) => x.id));
+  const placed = (rec.thinking || []).filter((t) => addedIds.has(t.message)).map((t) => t.text);
+  const thoughts = [...assistant.filter((a) => a.p.type === 'reasoning' || a.p.type === 'redacted-reasoning').map((a) => a.p.text || ''), ...placed];
   // Cursor also stores each step (thinking, agent text, tool call with result) as a ConversationStep
-  // blob under the conversation's turns; the plugin reads only the prompt messages.
+  // blob under the conversation's turns; the plugin records the thinking from them (thinking.json).
   const steps = [...run.blobs.values()].filter((b) => b.roles.some((r) => r.ref === 'turn_step') && b.decoded.message).map((b) => b.decoded.message);
   const stepText = { text: steps.map((m) => m.assistant_message && m.assistant_message.text), thinking: steps.map((m) => m.thinking_message && m.thinking_message.text) };
   const recordedAs = [...new Set(assistant.map((a) => a.p.type).filter((t) => t !== 'text' && t !== 'tool-call'))];
@@ -321,7 +326,8 @@ function checkAgentStream(run, addedMsgs, add) {
       if (!e.text.trim()) continue;
       if (recorded.some((t) => t === e.text) || joined.includes(e.text)) continue;
       const nearest = recorded.map((t) => diffText(e.text, t)).sort((a, b) => b.firstDifference - a.firstDifference)[0];
-      add(`streamed-${kind}-not-recorded`, 'agent-text', { where: e.where, wireText: e.text, deltas: e.deltas, inTurnSteps: stepText[kind].includes(e.text), recordedAs: kind === 'thinking' ? recordedAs : undefined, diff: nearest });
+      const elsewhere = kind === 'thinking' ? (rec.thinking || []).some((t) => t.text === e.text) : undefined;
+      add(`streamed-${kind}-not-recorded`, 'agent-text', { where: e.where, wireText: e.text, deltas: e.deltas, inTurnSteps: stepText[kind].includes(e.text), recordedAs: kind === 'thinking' ? recordedAs : undefined, recordedOnAnotherMessage: elsewhere, diff: nearest });
     }
   };
   check('text', texts);
@@ -372,8 +378,15 @@ function checkTools(run, addedMsgs, add) {
   for (const e of run.client.filter((x) => x.kind === 'exec_result')) {
     const ask = run.server.find((s) => s.kind === 'exec' && s.id === e.id);
     if (!ask || !ask.args || !ask.args.tool_call_id) continue;
+    // What the tool returned that the model is told in the call instead (a read's path).
+    const call = findIn(recCalls, ask.args.tool_call_id);
+    const args = call ? leaves(call.p.args).map((a) => a.text) : [];
     for (const l of leaves(e.result)) {
       if (!isContent(l) || recordedResults.includes(l.text)) continue;
+      if (args.includes(l.text)) {
+        add('tool-output-in-recorded-call-args', undefined, { execId: e.id, op: e.op, toolCallId: ask.args.tool_call_id, path: l.path, match: 'call-args', text: l.text });
+        continue;
+      }
       const match = looseMatch(l.text, recordedResults, cache);
       const detail = { execId: e.id, op: e.op, toolCallId: ask.args.tool_call_id, path: l.path, match, text: l.text };
       if (match === 'none') add('tool-output-not-in-recorded-result', 'tool-calls', detail);

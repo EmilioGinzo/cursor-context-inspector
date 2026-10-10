@@ -168,4 +168,4 @@ function splitBody(body, headers) {
   return result;
 }
 
-module.exports = { header, classify, decompress, splitBody, looksEnveloped };
+module.exports = { header, classify, decompress, splitBody };

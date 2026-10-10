@@ -5,6 +5,8 @@
 //   application/grpc-web[+proto]    same, flag bit7 = trailers frame (HTTP/1-style "k: v" lines)
 //   application/connect+proto|json  same envelope; bit0 = compressed (connect-content-encoding),
 //                                   bit1 = end-stream, whose payload is JSON {error?, metadata?}
+//   text/event-stream               Connect envelopes when the body walks as them (Cursor's RunSSE),
+//                                   otherwise raw SSE text
 //   application/proto|json          Connect unary: the whole body is one message (content-encoding)
 //   anything else                   one raw frame
 // Every frame keeps its byte offset in the body. A truncated tail becomes a final frame
@@ -113,14 +115,22 @@ function splitEnvelopes(body, protocol, encoding) {
   return frames;
 }
 
-// Whether `body` walks as a chain of Connect envelopes (flags 0-3, lengths that fit; the last may be cut).
+// Whether `body` walks as a chain of Connect envelopes: flags 0-3 at every envelope start. The
+// stream may be cut anywhere after the first header (inside a payload or a later header); the
+// split then reports it as truncated. SSE text never starts with a byte below 4.
 function looksEnveloped(body) {
-  let pos = 0;
-  while (pos + 5 <= body.length) {
+  if (body.length < 5) return false;
+  for (let pos = 0; pos + 5 <= body.length; pos += 5 + body.readUInt32BE(pos + 1)) {
     if (body[pos] > 3) return false;
-    pos += 5 + body.readUInt32BE(pos + 1);
   }
-  return body.length > 0 && (pos === body.length || pos > body.length);
+  return true;
+}
+
+// The body with its whole-body content-encoding undone, for sniffing; empty if that fails.
+function unwrapped(body, headers) {
+  const outer = header(headers, 'content-encoding');
+  if (!outer || outer.toLowerCase() === 'identity') return body;
+  try { return decompress(body, outer); } catch { return Buffer.alloc(0); }
 }
 
 // headers: [[name, value], ...] of the side the body belongs to (request or response).
@@ -129,7 +139,7 @@ function splitBody(body, headers) {
   let type = classify(header(headers, 'content-type'));
   // Cursor's RunSSE answers with content-type text/event-stream, but the body is Connect
   // streaming envelopes (compressed per connect-content-encoding). Real SSE text stays raw.
-  if (type.contentType === 'text/event-stream' && looksEnveloped(body)) type = { protocol: 'connect-stream', codec: 'proto', declaredContentType: type.contentType };
+  if (type.contentType === 'text/event-stream' && looksEnveloped(unwrapped(body, headers))) type = { protocol: 'connect-stream', codec: 'proto', declaredContentType: type.contentType };
   const result = { ...type, size: body.length, frames: [] };
   if (!body.length) return result;
 

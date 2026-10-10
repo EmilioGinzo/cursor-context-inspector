@@ -398,3 +398,42 @@ test('a text/event-stream body made of Connect envelopes splits as connect-strea
   const sse = frames.splitBody(Buffer.from('data: {"a":1}\n\n'), headers);
   assert.strictEqual(sse.protocol, 'raw');
 });
+
+test('a text/event-stream envelope body cut anywhere after its first header splits as a truncated connect-stream', () => {
+  const headers = [['content-type', 'text/event-stream'], ['connect-content-encoding', 'gzip']];
+  const envelopes = [pb.envelope(0, pb.msg(pb.len(1, 'a'))), pb.envelope(1, zlib.gzipSync(pb.msg(pb.len(1, 'b')))), pb.envelope(2, Buffer.from('{}'))];
+  const body = Buffer.concat(envelopes);
+  const boundaries = new Set(envelopes.map((_, i) => Buffer.concat(envelopes.slice(0, i + 1)).length));
+  for (let n = 5; n < body.length; n++) {
+    const split = frames.splitBody(body.subarray(0, n), headers);
+    assert.strictEqual(split.protocol, 'connect-stream', `cut at ${n}`);
+    assert.strictEqual(split.truncated, !boundaries.has(n), `cut at ${n}`);
+  }
+  for (let n = 1; n < 5; n++) assert.strictEqual(frames.splitBody(body.subarray(0, n), headers).protocol, 'raw');
+});
+
+test('real SSE text stays raw, also behind a gzip content-encoding', () => {
+  const sse = ['data: {"a":1}\n\n', ': keep-alive\n\n', 'event: done\r\ndata: x\r\n\r\n', 'id: 1\nretry: 10\n\n'];
+  for (const text of sse) {
+    assert.strictEqual(frames.splitBody(Buffer.from(text), [['content-type', 'text/event-stream; charset=utf-8']]).protocol, 'raw', text);
+    const gz = frames.splitBody(zlib.gzipSync(text), [['content-type', 'text/event-stream'], ['content-encoding', 'gzip']]);
+    assert.strictEqual(gz.protocol, 'raw', text);
+    assert.strictEqual(gz.frames[0].payload.toString(), text);
+  }
+  // Envelopes behind a whole-body gzip are still recognised.
+  const env = Buffer.concat([pb.envelope(0, pb.msg(pb.len(1, 'a'))), pb.envelope(2, Buffer.from('{}'))]);
+  const split = frames.splitBody(zlib.gzipSync(env), [['content-type', 'text/event-stream'], ['content-encoding', 'gzip']]);
+  assert.strictEqual(split.protocol, 'connect-stream');
+  assert.strictEqual(split.frames.length, 2);
+});
+
+test('the compressed flag of an event-stream envelope follows connect-content-encoding', () => {
+  const msg = pb.msg(pb.len(1, 'hi'));
+  const plain = frames.splitBody(pb.envelope(1, zlib.gzipSync(msg)), [['content-type', 'text/event-stream'], ['connect-content-encoding', 'gzip']]);
+  assert.ok(plain.frames[0].payload.equals(msg));
+  const none = frames.splitBody(pb.envelope(1, zlib.gzipSync(msg)), [['content-type', 'text/event-stream']]);
+  assert.strictEqual(none.protocol, 'connect-stream');
+  assert.match(none.frames[0].decompressError, /no encoding was negotiated/);
+  const br = frames.splitBody(pb.envelope(1, zlib.brotliCompressSync(msg)), [['content-type', 'text/event-stream'], ['connect-content-encoding', 'br']]);
+  assert.ok(br.frames[0].payload.equals(msg));
+});

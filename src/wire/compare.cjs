@@ -228,6 +228,13 @@ function compareRun(run, rec, ctx) {
     if (!b.sha256Ok) add('wire-blob-hash-mismatch', 'root-hashes', { id: b.id, sources: b.sources.map((s) => s.how), size: b.data.length });
     if (b.conflicts) add('wire-blob-sent-twice-differently', 'root-hashes', { id: b.id, sources: b.sources.map((s) => s.how) });
   }
+  // Context sent only as a blob id (request_context_parts): unless its bytes travelled, neither the
+  // wire nor the record shows what the server used.
+  for (const r of run.refs) {
+    if (/^context_/.test(r.ref) && !run.blobs.has(r.id)) {
+      add('context-sent-by-reference', 'request-context', { ref: r.ref, id: r.id, bytes: r.bytes, inDb: rec.db && rec.db.found ? rec.db.hasBlob(r.id) : undefined });
+    }
+  }
   for (const e of run.server) if (e.kind === 'kv_get_blob_args' && e.missingOnClient) add('server-asked-blob-client-lacked', 'complete-record', { id: e.blobId, where: e.where });
 
   // The prompt: every id of every state the wire carried, against the record.

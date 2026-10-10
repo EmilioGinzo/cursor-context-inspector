@@ -359,6 +359,22 @@ test('compare: thinking kept only as turn steps, and context reformatted in the 
   assert.strictEqual(verdict(r, 'tool-calls'), 'holds');
 });
 
+test('compare: context sent only by reference is reported with its size', (t) => {
+  const { wire, history } = tmp(t);
+  const rules = sha(Buffer.from('rules part'));
+  writeFlow(wire, '100000-00001-agent.v1.AgentService_Run', {
+    url: 'https://x/agent.v1.AgentService/Run', started: 1,
+    reqBody: stream([client({ run_request: { conversation_id: CID, conversation_state: { root_prompt_messages_json: ids('sys', 'u0', 'a0') },
+      action: { user_message_action: { user_message: { text: 'again' } }, request_context_parts: { rules_blob_id: rules, rules_byte_length: 10 } } } })], false),
+    respBody: stream([]),
+  });
+  writeRecord(history, { seen: ['sys', 'u0', 'a0'], snapshots: [['sys', 'u0', 'a0']] });
+  const [r] = compareLib.compare({ conversations: conversation.reconstruct({ root: wire, schema }).conversations, historyDir: history });
+  const f = r.runs[0].findings.filter((x) => x.kind === 'context-sent-by-reference');
+  assert.deepStrictEqual(f.map((x) => [x.ref, x.id, x.bytes]), [['context_rules', rules.toString('hex'), 10]]);
+  assert.strictEqual(verdict(r, 'request-context'), 'contradicted');
+});
+
 test('diffText and outOfOrder', () => {
   assert.deepStrictEqual(compareLib.diffText('same', 'same'), { same: true });
   const d = compareLib.diffText('a\nb\nc\nd', 'a\nB\nc\nd');

@@ -151,6 +151,7 @@ holds its final state even when Cursor stores it without a newer timestamp:
 | Path | Contents |
 | --- | --- |
 | `chats/<chat name>/chat.md` | The conversation, readable: your messages, the agent's replies, its thinking and each tool call with its result (collapsed), and links to subagents. Leaves out the system prompt and the context Cursor adds to your messages. |
+| `chats/<chat name>/thinking.json` | The agent's readable thinking, in order, each with the prompt message (and its reasoning part) it belongs to and how long it took. See [Thinking](#thinking). |
 | `chats/<chat name>/transcript.md` | Every prompt message ever seen in the chat, raw, in order. Messages Cursor later dropped (e.g. by summarizing) are kept and marked. Lists the chat's subagents and links each one where it was spawned. |
 | `chats/<chat name>/snapshots/<time>.json` | Token breakdown and the prompt's message hashes at each change. `<time>` is when the chat last changed: the send, or the agent's last stored state. A snapshot is never overwritten: a second state under a taken name gets `-at<recorded time>`. |
 | `chats/<chat name>/snapshots/<lastUpdatedAt>-<n>.json` | The first `n` of those hashes: a state the chat went through before that update. Cursor keeps only the newest state, but each assistant message was written by a model call that saw exactly the messages before it (`"state": "prompt"`), and a turn ended before each user message that follows the agent (`"turn end"`). Derived, not observed: only while the chat just grew, so not across a summary or an edit of an earlier message, which rewrite the prompt; the states of such a run are then not recorded. |
@@ -173,6 +174,25 @@ holds its final state even when Cursor stores it without a newer timestamp:
 - **Commands:** **Record History of All Chats** records everything at once;
   **Open Session History Folder** opens the folder.
 
+### Thinking
+
+The prompt Cursor sends keeps the model's thinking only as `redacted-reasoning`:
+reasoning that the model's provider returned encrypted (Anthropic's
+`redacted_thinking`, OpenAI's `encrypted_content`, Cursor's own models alike).
+Cursor passes it back to the model unread and never decrypts it (its own UI
+shows `[REDACTED]`). The bytes look like ciphertext: base64 of random-looking
+data, about 8 bits of entropy per byte, not protobuf, gzip or text. It cannot
+be read on this machine.
+
+The thinking Cursor shows while the agent works is stored separately, in the
+chat's turns (`ConversationStep` blobs, protobuf), and is exactly what the
+server streamed. The recorder keeps it in `thinking.json` and places each
+thinking on the prompt message the model wrote after it: the message with the
+agent text or tool call that followed it. `chat.md` shows it there, labelled
+**sent to the model encrypted** with the encrypted size. Encrypted thinking with
+no readable copy is shown as **encrypted**, with its size. `transcript.md`
+quotes the readable thinking after its message.
+
 ## Where the data comes from
 
 The extension opens Cursor's `state.vscdb` read-only:
@@ -180,7 +200,7 @@ The extension opens Cursor's `state.vscdb` read-only:
 | Key | Contents |
 | --- | --- |
 | `composerData:<chatId>` | The popover numbers (`promptTokenBreakdown`), Cursor's per-item usage tree (`promptContextUsageTree`, newer chats) and `conversationState`. |
-| `agentKv:blob:<sha256>` | The prompt messages (system, user, assistant, tool) as JSON. |
+| `agentKv:blob:<sha256>` | The prompt messages (system, user, assistant, tool) as JSON; the chat's turns and their steps (thinking, agent text, tool calls) as protobuf. |
 
 When a chat has Cursor's usage tree, each item is the exact character span
 Cursor counted. Text the tree leaves out (for example MCP sections in the
@@ -301,6 +321,7 @@ src/extension.cjs     activation, commands, webview panel, history timer
 src/cursorStore.cjs   reads state.vscdb and builds the context breakdown
 src/history.cjs       session history recorder and backfill
 src/chatMarkdown.cjs  renders chat.md
+src/turnSteps.cjs     reads Cursor's turn steps and places their thinking on prompt messages
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
 src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles

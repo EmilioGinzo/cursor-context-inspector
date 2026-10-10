@@ -510,3 +510,21 @@ test('thinking whose message was never recorded is shown before the first placed
   assert.ok(gone !== -1, 'labelled as unplaced');
   assert.ok(md.indexOf('first question') < gone && gone < md.indexOf('Say hello.') && md.indexOf('Say hello.') < md.indexOf('The end.'), 'in order');
 });
+
+test('thinking whose message Cursor writes after the chat is recorded is placed on it', () => {
+  const { db, save, dir } = setup();
+  settledState(dir, 500);
+  const reply = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Late.' }] };
+  const turns = [[step.thinking('Thought late.'), step.text('Late.')]];
+  save(1000, [sys, first, reply], { status: 'completed', turns });
+  const late = crypto.createHash('sha256').update(JSON.stringify(reply)).digest('hex');
+  db.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`agentKv:blob:${late}`);
+  history.tick(db, dir);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'))[0].message, null);
+  save(1000, [sys, first, reply], { status: 'completed', turns });
+  history.tick(db, dir);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'))[0].message, late);
+  assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /sent to the model encrypted, 3 bytes\)<\/i><\/summary>\n\nThought late\./);
+});
+

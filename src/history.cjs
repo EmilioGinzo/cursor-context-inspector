@@ -177,7 +177,11 @@ function recordChat(db, composerId, dir, visited = new Set()) {
   if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
     && (latest.messages || []).join() === hashes.join()) {
     const meta = readJson(metaFile, {});
-    if (fetched && meta.seen) writeTranscript(db, dir, chatDir, meta, hashes);
+    // The late message may be the one a thinking belongs to.
+    if (fetched && meta.seen) {
+      recordThinking(db, dir, chatDir, meta, composer.conversationState);
+      writeTranscript(db, dir, chatDir, meta, hashes);
+    }
     return recorded;
   }
 

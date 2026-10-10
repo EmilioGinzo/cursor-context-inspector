@@ -27,6 +27,7 @@ sent anywhere.
 - [Session history](#session-history)
 - [Where the data comes from](#where-the-data-comes-from)
 - [CLI](#cli)
+- [Recording Cursor's wire traffic](#recording-cursors-wire-traffic)
 - [Limitations](#limitations)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -208,6 +209,45 @@ Ping request  [9f37163b-346e-42d7-8f95-622e23613f9b]  model=composer-2.5  tree=f
   ...
 ```
 
+## Recording Cursor's wire traffic
+
+To check that the recorded history matches what Cursor really sends to its
+servers, `tools/cursor-wire` runs a local [mitmproxy](https://mitmproxy.org/)
+that records every request and response between Cursor and the network. This is
+a development tool: it is not part of the extension and not in the `.vsix`.
+
+One-time setup (Linux; needs `uv` and `certutil` from nss):
+
+```sh
+uv tool install mitmproxy
+tools/cursor-wire ca install   # trust mitmproxy's CA in ~/.pki/nssdb, which Cursor uses
+```
+
+Each session:
+
+```sh
+tools/cursor-wire start        # proxy on 127.0.0.1:8080 (--port N for another)
+tools/cursor-wire launch       # start Cursor through it; Cursor must not already be running
+tools/cursor-wire status
+tools/cursor-wire stop         # stops only the proxy this script started
+```
+
+`tools/cursor-wire env` prints the launch command, if you prefer to start Cursor
+yourself.
+
+Captures go to `~/.cursor-wire/<day>/`, one folder per request, with
+`meta.json` (method, URL, headers, status, trailers such as `grpc-status`,
+timings), `request.bin.gz` and `response.bin.gz` (the exact body bytes, streamed
+as they pass), plus one line per request in `flows.jsonl`. Nothing is capped or
+dropped. Authorization, cookie and API key headers are redacted in `meta.json`,
+but the bodies are kept whole: they hold your prompts and code, so treat the
+folder like the chats themselves. `cursor-context wire ls|show` decodes them
+(added on a separate branch).
+
+To undo: `tools/cursor-wire stop`, `tools/cursor-wire ca remove`, then
+`uv tool uninstall mitmproxy` (and delete `~/.mitmproxy` and `~/.cursor-wire`
+if you no longer want the CA or the captures).
+
 ## Limitations
 
 - **Tool definitions are not stored locally.** Cursor's backend attaches
@@ -226,6 +266,7 @@ src/history.cjs       session history recorder and backfill
 src/chatMarkdown.cjs  renders chat.md
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
+tools/cursor-wire     wire-traffic recorder (mitmproxy add-on cursor-wire.py)
 test/                 node:test suites (npm test)
 ```
 

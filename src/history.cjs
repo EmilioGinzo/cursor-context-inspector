@@ -29,6 +29,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const store = require('./cursorStore.cjs');
+const storeIndex = require('./storeIndex.cjs');
 const turnSteps = require('./turnSteps.cjs');
 const { chatMarkdown, userBlocks } = require('./chatMarkdown.cjs');
 const sentContext = require('./sentContext.cjs');
@@ -185,9 +186,45 @@ function writeSnapshot(chatDir, name, snapshot, data = JSON.stringify(snapshot, 
   }
 }
 
+// A lookup in the store that finds nothing again later (its message is not written yet) waits until
+// the store has grown RETRY_ROWS rows past the first miss; then it is given up. Chats still waiting are
+// recorded again by the ticks (see unsettled).
+const RETRY_ROWS = 20000;
+const searching = new Set();
+
+// Settles one lookup: `wait` maps its key to the rowid it is given up at. True when it is done.
+function settle(db, index, wait, key, hits) {
+  if (hits.length) { delete wait[key]; return true; }
+  if (wait[key] === undefined) wait[key] = store.maxRowid(db) + RETRY_ROWS;
+  if (index.watermark() >= wait[key]) { delete wait[key]; return true; }
+  return false;
+}
+
+// Keeps the lookups still waiting in the chat's meta, and the chat in the ones the ticks retry.
+function applyScanPending(meta, dir, composerId, calls, replies) {
+  const key = `${dir}\n${composerId}`;
+  if (Object.keys(calls).length || Object.keys(replies).length) {
+    meta.scanPending = { calls, replies };
+    searching.add(key);
+  } else {
+    delete meta.scanPending;
+    searching.delete(key);
+  }
+}
+
+// The store's index for `dir`: the one the caller brought (a tick reads it in steps), or else read up
+// to date here, in full.
+function indexFor(db, dir, options) {
+  if (options.index) return options.index;
+  const index = storeIndex.open(dir);
+  index.advance(db);
+  return index;
+}
+
 // Record one chat and the subagents it spawned. Returns the number of new snapshots.
 // options.sentContext: rebuild the context sent with new user messages (sentContext.record).
 // options.clock: the time recordedAt is taken from (Date.now).
+// options.index: the store's index (storeIndex.open), kept up to date by the caller.
 function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (visited.has(composerId)) return 0;
   visited.add(composerId);
@@ -211,14 +248,14 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const previous = readJson(metaFile, {});
   // Messages Cursor kept that are no longer in the prompt. Two kinds: the ones summarization archived
   // (the state's summary archive names them), and the earlier version of a result that was replaced in
-  // the prompt, which nothing in the state names: only a read of the whole store finds it, by its call
-  // id. That read is costly, so it runs once per set of calls, and not while a run writes the chat.
+  // the prompt, which nothing in the state names: only the store does, by the call's id. The store is
+  // indexed once (storeIndex.cjs), so a lookup is a query, and a lookup runs once a run has ended.
   const archived = turnSteps.archivedHashes(db, composer.conversationState);
   const turns = turnSteps.loadTurns(db, composer.conversationState);
   const scanned = new Set(previous.scannedCalls || []);
   const unscanned = [...new Set(turns.flatMap((t) => t.steps).map(turnSteps.callIdOf).filter(Boolean))].filter((id) => !scanned.has(id));
   // The replies Cursor showed (bubble text) that no recorded message holds: an interrupted reply is kept
-  // by Cursor outside the prompt. Each bubble is checked once (scannedReplies), and searched for with the calls.
+  // by Cursor outside the prompt. Each bubble is looked for once its reply is stored (see settle).
   const repliedBefore = previous.scannedReplies || [];
   const replied = new Set(repliedBefore);
   const pending = turnSteps.bubbleReplies(db, composerId).filter((r) => !replied.has(r.bubble));
@@ -227,24 +264,30 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const missing = pending.filter((r) => !texts.has(r.text.trim()));
   // Not while a run writes the chat (the same test as unsettled()): its results and replies may still change.
   const writing = composer.status === 'generating' || (composer.generatingBubbleIds || []).length > 0;
-  const scanNow = (unscanned.length > 0 || missing.length > 0) && options.scanCalls !== false && !writing;
-  const replyMarks = (scanNow ? pending : matched).map((r) => r.bubble);
+  const lookingNow = (unscanned.length > 0 || missing.length > 0) && !writing;
+  const waiting = previous.scanPending || {};
+  const callWaiting = Object.fromEntries(Object.entries(waiting.calls || {}).filter(([id]) => unscanned.includes(id)));
+  const replyWaiting = Object.fromEntries(Object.entries(waiting.replies || {}).filter(([b]) => missing.some((r) => r.bubble === b)));
+  const replyMarks = matched.map((r) => r.bubble);
   const found = new Map();
-  if (scanNow) {
-    // Between the rows of the chat's own blobs (Cursor stores a run's messages as it goes).
+  const index = lookingNow ? indexFor(db, dir, options) : undefined;
+  let callsDone = [];
+  if (index) {
+    // Only the chat's own span (Cursor stores a run's messages as it goes): the rows between its blobs.
     const own = [...hashes, ...archived, ...turns.flatMap((t) => [t.turn, ...t.steps.map((s) => s.hash)])]
       .map((h) => store.rowidOf(db, `agentKv:blob:${h}`)).filter((r) => r !== undefined);
-    const ids = new Set(unscanned);
-    // The text as Cursor stores it (JSON), a prefix of it: the candidates are checked below.
-    const probes = missing.map((r) => JSON.stringify(r.text).slice(1, -1).slice(0, 120));
-    const replyTexts = new Set(missing.map((r) => r.text.trim()));
-    for (const { hash, value } of own.length ? store.blobsNaming(db, [...unscanned, ...probes], Math.min(...own), Math.max(...own)) : []) {
-      let message;
-      try { message = JSON.parse(value.toString('utf8')); } catch { continue; }
-      if (!message || !Array.isArray(message.content)) continue;
-      const call = message.content.some((p) => p && ids.has(p.toolCallId));
-      const reply = message.role === 'assistant' && message.content.some((p) => p && p.type === 'text' && replyTexts.has(String(p.text).trim()));
-      if (call || reply) found.set(hash, value);
+    const lo = Math.min(...own);
+    const hi = Math.max(...own);
+    const inSpan = (hash) => { const r = store.rowidOf(db, `agentKv:blob:${hash}`); return r !== undefined && r >= lo && r <= hi; };
+    for (const id of unscanned) {
+      const hits = index.callHashes(id).filter(inSpan);
+      for (const h of hits) found.set(h, true);
+      if (settle(db, index, callWaiting, id, hits)) callsDone.push(id);
+    }
+    for (const r of missing) {
+      const hits = index.textHashes(r.text).filter(inSpan);
+      for (const h of hits) found.set(h, true);
+      if (settle(db, index, replyWaiting, r.bubble, hits)) replyMarks.push(r.bubble);
     }
   }
   // Before the check below: Cursor may write a message after the prompt that lists it.
@@ -252,7 +295,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   for (const hash of new Set([...hashes, ...archived, ...found.keys()])) {
     const blobFile = path.join(dir, 'blobs', `${hash}.json`);
     if (fs.existsSync(blobFile)) continue;
-    const value = found.has(hash) ? found.get(hash) : store.getValue(db, `agentKv:blob:${hash}`);
+    const value = store.getValue(db, `agentKv:blob:${hash}`);
     if (value === undefined) continue;
     writeAtomic(blobFile, value);
     fetched.add(hash);
@@ -286,15 +329,16 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
       const seenBefore = meta.seen.length;
       remember(meta);
       if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
-      if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
+      if (index) meta.scannedCalls = [...scanned, ...callsDone];
       if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
-      if (scanNow || meta.seen.length !== seenBefore) {
+      applyScanPending(meta, dir, composerId, callWaiting, replyWaiting);
+      if (index || meta.seen.length !== seenBefore) {
         const states = recordReplaced(dir, chatDir, composerId, composer, hashes, meta.seen, new Set(archived), options.clock || Date.now);
         if (states) meta.snapshots = (meta.snapshots || 0) + states;
       }
       const relinked = addToolCallId(meta, composer);
       const changed = meta.seen.length !== seenBefore;
-      if (sent || scanNow || changed || relinked || replyMarks.length) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+      if (sent || index || changed || relinked || replyMarks.length || waiting.calls || waiting.replies) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       // The late message may be the one a thinking belongs to.
       if (fetched.size || changed) {
         recordThinking(db, dir, chatDir, meta, turns, composerId);
@@ -333,8 +377,9 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
 
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...previous };
   remember(meta);
-  if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
+  if (index) meta.scannedCalls = [...scanned, ...callsDone];
   if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
+  applyScanPending(meta, dir, composerId, callWaiting, replyWaiting);
   Object.assign(meta, {
     name: composer.name || 'Untitled chat',
     model: snapshot.model,
@@ -395,13 +440,27 @@ function placeStored(db, list, hashes) {
   }
 }
 
+// A recorded message, read once per process for the reads that only look at it (a blob is written whole and
+// never changes, and a chat's messages are looked at again on every record of the chat).
+const messageMemo = new Map();
+function readMessageOnce(dir, hash) {
+  const file = path.join(dir, 'blobs', `${hash}.json`);
+  if (!messageMemo.has(file)) {
+    const message = readJson(file, undefined);
+    if (message === undefined) return undefined;
+    if (messageMemo.size >= 4000) messageMemo.clear();
+    messageMemo.set(file, message);
+  }
+  return messageMemo.get(file);
+}
+
 // The texts (trimmed) of the assistant messages under these hashes. A message not written yet is read from the store.
 function recordedTexts(db, dir, hashes) {
   const out = new Set();
   for (const h of new Set(hashes)) {
     const file = path.join(dir, 'blobs', `${h}.json`);
     let message;
-    if (fs.existsSync(file)) message = readJson(file, undefined);
+    if (fs.existsSync(file)) message = readMessageOnce(dir, h);
     else { try { message = JSON.parse(store.getValue(db, `agentKv:blob:${h}`) || 'null'); } catch { message = undefined; } }
     if (message && message.role === 'assistant' && Array.isArray(message.content)) {
       for (const p of message.content) if (p && p.type === 'text' && typeof p.text === 'string') out.add(p.text.trim());
@@ -416,7 +475,7 @@ function recordedTexts(db, dir, hashes) {
 // earlier version at the result's index. `seen`: the chat's messages in the record; `archived`: the ones summarization
 // took out (a summary, not a replacement).
 function replacedStates(dir, hashes, seen, archived) {
-  const read = (h) => readJson(path.join(dir, 'blobs', `${h}.json`), undefined);
+  const read = (h) => readMessageOnce(dir, h);
   const callIds = (m) => (m && Array.isArray(m.content) ? m.content.filter((p) => p && typeof p.toolCallId === 'string').map((p) => p.toolCallId) : []);
   const inPrompt = new Set(hashes);
   // An archived message was in an earlier prompt, not a replaced result of this one.
@@ -685,6 +744,7 @@ function writeIndex(dir) {
 // A chat still running, or whose prompt messages Cursor has not all written yet.
 // It can change without a newer timestamp, so it is checked again until it settles.
 function unsettled(db, dir, composerId) {
+  if (searching.has(`${dir}\n${composerId}`)) return true;
   const raw = store.getValue(db, `composerData:${composerId}`);
   if (raw === undefined) return false;
   const composer = JSON.parse(raw);
@@ -800,4 +860,4 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length };
 }
 
-module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex };
+module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

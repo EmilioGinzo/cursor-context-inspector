@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const vscode = require('vscode');
 const store = require('./cursorStore.cjs');
 const history = require('./history.cjs');
+const storeIndex = require('./storeIndex.cjs');
 const sentContext = require('./sentContext.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
@@ -80,7 +81,7 @@ function startRecorder(context) {
     timer = setTimeout(run, backfilling ? 5000 : 30000);
   };
   timer = setTimeout(run, 5000);
-  context.subscriptions.push({ dispose: () => { clearTimeout(timer); if (db) db.close(); } });
+  context.subscriptions.push({ dispose: () => { clearTimeout(timer); if (db) db.close(); storeIndex.close(historyDir()); } });
 }
 
 async function openHistoryFolder() {

@@ -132,13 +132,18 @@ async function run(argv, out = process.stdout) {
     let historyDir = opts.history || require('../history.cjs').defaultHistoryDir();
     const db = opts['no-db'] ? null : openDb(opts.db);
     let fresh;
+    let index;
     try {
       if (opts['record-now']) {
         if (!db) throw new Error('--record-now needs Cursor\'s DB');
         const history = require('../history.cjs');
+        const storeIndex = require('../storeIndex.cjs');
         fresh = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cursor-context-record-'));
         const sentContext = { enabled: true, maxAgeMs: Infinity, appDir: opts.app, cache: new Map() };
-        for (const c of rebuilt.conversations) history.recordChat(db, c.conversationId, fresh, undefined, { sentContext });
+        // The store is read in full first (in a fresh folder the index is built, not reused).
+        index = storeIndex.open(fresh);
+        index.advance(db);
+        for (const c of rebuilt.conversations) history.recordChat(db, c.conversationId, fresh, undefined, { sentContext, index });
         historyDir = fresh;
       }
       const results = compareLib.compare({ conversations: rebuilt.conversations, historyDir, db, ref });
@@ -152,6 +157,7 @@ async function run(argv, out = process.stdout) {
       return 0;
     } finally {
       if (db) db.close();
+      if (index) index.close();
       if (fresh) fs.rmSync(fresh, { recursive: true, force: true });
     }
   }

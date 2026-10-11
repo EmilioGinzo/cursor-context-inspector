@@ -670,115 +670,130 @@ test('a replaced result joins the record where it was in the chat, not before th
   assert.ok(transcript.indexOf('the old read') < transcript.indexOf('the new read'));
 });
 
+// The index's lookups of the store (storeIndex.cjs), counted by kind.
+function countLookups(dir) {
+  const index = require('../src/storeIndex.cjs').open(dir);
+  const counts = { calls: 0, texts: 0 };
+  const callHashes = index.callHashes;
+  const textHashes = index.textHashes;
+  index.callHashes = (id) => { counts.calls++; return callHashes(id); };
+  index.textHashes = (text) => { counts.texts++; return textHashes(text); };
+  return counts;
+}
+
 test('the store is searched for replaced results only once a run has ended, and once per call', () => {
-  const store = require('../src/cursorStore.cjs');
-  const realScan = store.blobsNaming;
-  let scans = 0;
-  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
-  try {
-    const { db, save, dir } = setup();
-    const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_2', args: {} }] };
-    const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'first read' }] };
-    const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'second read' }] };
-    const turns = [[callStep('tool_read_2')]];
-    const running = { turns, generatingBubbleIds: ['bubble-running'] };
-    save(1000, [sys, first, call], running);
-    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
-    save(1500, [sys, first, call, newResult], running);
-    // A run is writing the chat: its results may still change, so the store is not searched yet.
-    history.recordUpdatedSince(db, dir, 0);
-    assert.strictEqual(scans, 0);
-    assert.ok(!fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
-    // The run ends: searched once, and not again for the same call.
-    save(2000, [sys, first, call, newResult], { turns });
-    history.recordUpdatedSince(db, dir, 1000);
-    assert.ok(fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
-    save(3000, [sys, first, call, newResult], { turns });
-    history.recordUpdatedSince(db, dir, 2000);
-    assert.strictEqual(scans, 1);
-  } finally {
-    store.blobsNaming = realScan;
-  }
+  const { db, save, dir } = setup();
+  const counts = countLookups(dir);
+  const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_2', args: {} }] };
+  const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'first read' }] };
+  const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'second read' }] };
+  const turns = [[callStep('tool_read_2')]];
+  const running = { turns, generatingBubbleIds: ['bubble-running'] };
+  save(1000, [sys, first, call], running);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+  save(1500, [sys, first, call, newResult], running);
+  // A run is writing the chat: its results may still change, so the store is not searched yet.
+  history.recordUpdatedSince(db, dir, 0);
+  assert.strictEqual(counts.calls, 0);
+  assert.ok(!fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
+  // The run ends: searched once, and not again for the same call.
+  save(2000, [sys, first, call, newResult], { turns });
+  history.recordUpdatedSince(db, dir, 1000);
+  assert.ok(fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
+  save(3000, [sys, first, call, newResult], { turns });
+  history.recordUpdatedSince(db, dir, 2000);
+  assert.strictEqual(counts.calls, 1);
 });
+
 test('the store is not searched while the chat is marked generating, before any bubble is', () => {
-  const store = require('../src/cursorStore.cjs');
-  const realScan = store.blobsNaming;
-  let scans = 0;
-  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
-  try {
-    const { db, save, dir } = setup();
-    const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_5', args: {} }] };
-    const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'first read' }] };
-    const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'second read' }] };
-    const turns = [[callStep('tool_read_5')]];
-    save(1000, [sys, first, call], { turns, status: 'generating' });
-    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
-    save(1500, [sys, first, call, newResult], { turns, status: 'generating' });
-    history.recordUpdatedSince(db, dir, 0);
-    assert.strictEqual(scans, 0);
-    save(2000, [sys, first, call, newResult], { turns });
-    history.recordUpdatedSince(db, dir, 1000);
-    assert.strictEqual(scans, 1);
-  } finally {
-    store.blobsNaming = realScan;
-  }
+  const { db, save, dir } = setup();
+  const counts = countLookups(dir);
+  const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_5', args: {} }] };
+  const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'first read' }] };
+  const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'second read' }] };
+  const turns = [[callStep('tool_read_5')]];
+  save(1000, [sys, first, call], { turns, status: 'generating' });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+  save(1500, [sys, first, call, newResult], { turns, status: 'generating' });
+  history.recordUpdatedSince(db, dir, 0);
+  assert.strictEqual(counts.calls, 0);
+  save(2000, [sys, first, call, newResult], { turns });
+  history.recordUpdatedSince(db, dir, 1000);
+  assert.strictEqual(counts.calls, 1);
 });
 
 test('a reply interrupted by the next prompt is recorded from the store, where it was in the chat', () => {
-  const store = require('../src/cursorStore.cjs');
-  const realScan = store.blobsNaming;
-  let scans = 0;
-  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
-  try {
-    const { db, save, dir } = setup();
-    const interrupted = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Session is up and responding.' }] };
-    const second = { role: 'user', content: 'second question' };
-    save(1000, [sys, first]);
-    // Cursor stored the reply (not in any prompt: the run was interrupted), then the next prompt.
-    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(interrupted)}`, Buffer.from(JSON.stringify(interrupted)));
-    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-1', JSON.stringify({ type: 2, text: 'Session is up and responding.' }));
-    save(2000, [sys, first, second]);
-    history.recordUpdatedSince(db, dir, 0);
-    const chat = path.join(dir, 'chats', 'History chat');
-    const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
-    assert.deepStrictEqual(meta.seen, [sys, first, interrupted, second].map(hashOf));
-    assert.deepStrictEqual(meta.scannedReplies, ['reply-1']);
-    assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /Session is up and responding\./);
-    assert.strictEqual(scans, 1);
-    // Checked once: a later tick does not search for the same bubble again.
-    save(3000, [sys, first, second]);
-    history.recordUpdatedSince(db, dir, 2000);
-    assert.strictEqual(scans, 1);
-  } finally {
-    store.blobsNaming = realScan;
-  }
+  const { db, save, dir } = setup();
+  const counts = countLookups(dir);
+  const interrupted = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Session is up and responding.' }] };
+  const second = { role: 'user', content: 'second question' };
+  save(1000, [sys, first]);
+  // Cursor stored the reply (not in any prompt: the run was interrupted), then the next prompt.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(interrupted)}`, Buffer.from(JSON.stringify(interrupted)));
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-1', JSON.stringify({ type: 2, text: 'Session is up and responding.' }));
+  save(2000, [sys, first, second]);
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.seen, [sys, first, interrupted, second].map(hashOf));
+  assert.deepStrictEqual(meta.scannedReplies, ['reply-1']);
+  assert.strictEqual(meta.scanPending, undefined);
+  assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /Session is up and responding\./);
+  assert.strictEqual(counts.texts, 1);
+  // Looked for once: a later tick does not look for the same bubble again.
+  save(3000, [sys, first, second]);
+  history.recordUpdatedSince(db, dir, 2000);
+  assert.strictEqual(counts.texts, 1);
 });
 
-test('a reply Cursor keeps in no stored message is checked once and not recorded', () => {
+test('a reply Cursor has not stored yet is looked for again, and recorded once it is stored', () => {
   const { db, save, dir } = setup();
+  const chat = path.join(dir, 'chats', 'History chat');
+  const second = { role: 'user', content: 'second question' };
+  const late = { role: 'assistant', content: [{ type: 'text', text: 'Stored late.' }] };
   save(1000, [sys, first]);
-  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-2', JSON.stringify({ type: 2, text: 'Never stored.' }));
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-2', JSON.stringify({ type: 2, text: 'Stored late.' }));
   history.recordUpdatedSince(db, dir, 0);
-  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8'));
+  let meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
   assert.deepStrictEqual(meta.seen, [sys, first].map(hashOf));
+  assert.deepStrictEqual(Object.keys(meta.scanPending.replies), ['reply-2']);
+  assert.strictEqual(meta.scannedReplies, undefined);
+  // Cursor writes the reply between the prompt's messages: the chat is looked at again and finds it.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(late)}`, Buffer.from(JSON.stringify(late)));
+  save(2000, [sys, first, second]);
+  history.recordUpdatedSince(db, dir, 1000);
+  meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.seen, [sys, first, late, second].map(hashOf));
+  assert.strictEqual(meta.scanPending, undefined);
   assert.deepStrictEqual(meta.scannedReplies, ['reply-2']);
 });
 
-test('a reply in the prompt is matched without a search of the store', () => {
-  const store = require('../src/cursorStore.cjs');
-  const realScan = store.blobsNaming;
-  let scans = 0;
-  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
-  try {
-    const { db, save, dir } = setup();
-    save(1000, [sys, first, answer]);
-    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-3', JSON.stringify({ type: 2, text: 'first answer' }));
-    history.recordUpdatedSince(db, dir, 0);
-    assert.strictEqual(scans, 0);
-    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8')).scannedReplies, ['reply-3']);
-  } finally {
-    store.blobsNaming = realScan;
-  }
+test('a lookup that finds nothing is given up once the store has grown RETRY_ROWS rows past it', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, first]);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-3', JSON.stringify({ type: 2, text: 'Never stored.' }));
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8')).scanPending);
+  db.exec('BEGIN');
+  for (let i = 0; i < history.RETRY_ROWS; i++) db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`other:${i}`, 'x');
+  db.exec('COMMIT');
+  save(2000, [sys, first, { role: 'user', content: 'second question' }]);
+  history.recordUpdatedSince(db, dir, 1000);
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.strictEqual(meta.scanPending, undefined);
+  assert.deepStrictEqual(meta.scannedReplies, ['reply-3']);
+  assert.deepStrictEqual(meta.seen, [sys, first, { role: 'user', content: 'second question' }].map(hashOf));
+});
+
+test('a reply in the prompt is matched without a look in the store', () => {
+  const { db, save, dir } = setup();
+  const counts = countLookups(dir);
+  save(1000, [sys, first, answer]);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-4', JSON.stringify({ type: 2, text: 'first answer' }));
+  history.recordUpdatedSince(db, dir, 0);
+  assert.strictEqual(counts.texts + counts.calls, 0);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8')).scannedReplies, ['reply-4']);
 });
 
 test('a short thought Cursor showed on a bubble is not held by a longer step that contains it', () => {

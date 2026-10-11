@@ -60,21 +60,32 @@ function rowidOf(db, key) {
   return row ? row.r : undefined;
 }
 
-// The message blobs stored between rows `from` and `to` whose text names one of `ids` (a tool call's
-// id, in its tool-call and tool-result parts): [{ hash, value }]. Nothing in a chat's state names the
-// message a call's result had before it was replaced in the prompt, but Cursor still stores it, between
-// the blobs of the run that made the call. The rows are the chat's own span (history.cjs), so the read
-// stays small: a whole-store read would cost seconds per chat.
-function blobsNaming(db, ids, from, to) {
-  const needles = [...new Set(ids)].filter(Boolean).map((id) => Buffer.from(id, 'utf8'));
-  if (!needles.length) return [];
+// The message blobs stored at rows `from` < rowid <= `to`, in storage order: [{ rowid, hash, value }]
+// (value: Buffer). Read by rowid range, so a row is read once however many chats want it. The value
+// of a row that is not a blob is not read (CASE), which keeps the large chat state rows out of the read.
+function blobRows(db, from, to) {
+  const rows = db.prepare(`SELECT rowid AS rowid, key,
+      CASE WHEN key >= 'agentKv:blob:' AND key < 'agentKv:blob;' THEN value END AS value
+    FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? ORDER BY rowid`).all(from, to);
   const out = [];
-  const rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE rowid BETWEEN ? AND ? AND key >= 'agentKv:blob:' AND key < 'agentKv:blob;'").iterate(from, to);
   for (const row of rows) {
-    const v = typeof row.value === 'string' ? Buffer.from(row.value, 'utf8') : Buffer.from(row.value);
-    if (needles.some((n) => v.includes(n))) out.push({ hash: row.key.slice('agentKv:blob:'.length), value: v });
+    if (row.value === null || row.value === undefined) continue;
+    const value = typeof row.value === 'string' ? Buffer.from(row.value, 'utf8') : Buffer.from(row.value);
+    out.push({ rowid: row.rowid, hash: row.key.slice('agentKv:blob:'.length), value });
   }
   return out;
+}
+
+// The largest rowid (0 for an empty store): the rows Cursor has written so far, in order.
+function maxRowid(db) {
+  const row = db.prepare('SELECT max(rowid) AS m FROM cursorDiskKV').get();
+  return row && row.m ? row.m : 0;
+}
+
+// The key of the last row at or below `rowid`: a row the index read, if it is still there.
+function keyAtOrBelow(db, rowid) {
+  const row = db.prepare('SELECT key FROM cursorDiskKV WHERE rowid <= ? ORDER BY rowid DESC LIMIT 1').get(rowid);
+  return row ? row.key : undefined;
 }
 
 // Subagent chats are excluded by default; they are reached through their parent.
@@ -604,7 +615,9 @@ module.exports = {
   openDatabase,
   getValue,
   rowidOf,
-  blobsNaming,
+  blobRows,
+  maxRowid,
+  keyAtOrBelow,
   messageText,
   ancestors,
   loadSubagents,

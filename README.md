@@ -264,7 +264,10 @@ tool snapshots Cursor writes under `~/.cursor/projects/<workspace>/mcps`. It
 uses Cursor's own ripgrep and frontmatter parser, so the bytes come out the
 same when the files have not changed; the panel shows them as **Sent with the
 request, rebuilt (not in the prompt)**. Only messages the recorder sees within 10 minutes
-are matched with a rebuild (older chats get none: the files may have changed).
+are matched with a rebuild (older chats get none: the files may have changed). A
+message is rebuilt for the time it was sent, which Cursor's user bubble (matched by
+its text) gives; a chat's messages sent at different times get one entry each, so
+the MCP servers connected then are the ones the entry shows.
 
 The MCP part follows what the request carries: the tools of Cursor's built-in
 servers in full (the set Cursor's bundle names, `rFE` in `cursor-agent-exec`: the
@@ -278,16 +281,29 @@ them, so a tool can have several values there: the one stored last is used, a no
 says so, and every value is kept in that file. Each count is of distinct stored parts,
 so a rescan does not count one twice.
 
+The files the chat wrote with its Write tool (a successful write, by the result it
+got) are part of that context too: Cursor's request context carries their current
+contents by path (`file_contents`, in the captured subagent runs: each file an agent
+wrote, none it only read). The recorder reads them from disk when it records the chat
+and again when they change, as `context/<sha256>.bin` (credentials replaced as above),
+in `meta.json` under `files` of the entry (an entry with no message when only a file
+changed), and the panel lists them under the sent-context category. Cursor sends a
+request context only when it asks for one, which is not every run; StrReplace edits
+are not counted (no captured run shows them in `file_contents`).
+
 A rebuilt part is what Cursor sent only when their sha256 match.
 `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
 under the same id. Which MCP servers were connected when the message was sent is
-read from Cursor's logs (`~/.config/Cursor/logs`: a server's failed connection
-attempts, and the outcome of each attempt, before the message's time). A server
-that was not connected is listed without its tools or instructions, as the
-captured requests show, and the note says which; a server the logs say nothing
-about is taken as connected. Things the rebuild cannot know: the order MCP
-servers connected in (Cursor's own servers are put first in the tool descriptors),
-team rules,
+read from Cursor's logs (`~/.config/Cursor/logs`): each server's own log says when
+it connected or failed to, and the workbench logs say when a client was created
+or failed; the last of those before the message decides, and a failure counts only
+for three minutes after it (Cursor retries a server that is down, but does not log
+its recovery). A server that was not connected is listed without its tools or
+instructions, as the captured requests show, and the note says which; a server the
+logs say nothing recent about is taken as connected. Things the rebuild cannot know:
+the order MCP servers connected in (Cursor's own servers are put first in the tool
+descriptors; the order of the file-system descriptors is the folders' order on disk,
+which Cursor re-creates when its MCP state changes), team rules,
 Agent Store skills, and plugin database ids, which are taken from a part Cursor
 kept in its database when there is one (`context/plugin-ids.json`). Nor the order of a rule
 edited while Cursor runs (Cursor moves it to the end of its list), or files

@@ -15,6 +15,7 @@ const rc = require('../src/requestContext.cjs');
 const sources = require('../src/contextSources.cjs');
 const history = require('../src/history.cjs');
 const mcpConnections = require('../src/mcpConnections.cjs');
+const sentContext = require('../src/sentContext.cjs');
 
 const APP = sources.DEFAULT_APP_DIR;
 const haveCursor = fs.existsSync(path.join(APP, 'node_modules', 'gray-matter'));
@@ -173,7 +174,7 @@ test('the recorder keeps the context sent with each new user message, once, and 
   assert.match(rulesMd, /<details><summary><code>[^<]*always\.mdc<\/code> — global<\/summary>/);
   assert.match(rulesMd, /Always do this\./);
   const snap = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'snapshots', `${now}.json`), 'utf8'));
-  assert.deepStrictEqual(snap.sentContext.messages, [hashOf(q2)]);
+  assert.deepStrictEqual(snap.sentContext.map((e) => e.messages), [[hashOf(q2)]]);
 
   const md = fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'chat.md'), 'utf8');
   const sections = md.split('<details><summary>Context sent with this message, rebuilt (not in the prompt)</summary>');
@@ -515,6 +516,105 @@ test('the bundle of this Cursor, when it is installed, names the browser server 
   assert.ok(servers.has('cursor-ide-browser'));
 });
 
+test('the files the chat wrote are kept as they are on disk: once per change, even with no new message', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const file = path.join(root, 'tickets', 'expectations.md');
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  const wrote = (callId, p, result = `Wrote contents to ${p}`) => [
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: callId, toolName: 'Write', args: { path: p, contents: 'x' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: callId, result }] },
+  ];
+  const dir = path.join(root, 'history');
+  const options = { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } };
+  const meta = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8'));
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  write(file, 'first draft\n');
+  save('c', Date.now(), [user('one'), ...wrote('t1', file)]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  let entries = meta().sentContext;
+  assert.deepStrictEqual(Object.keys(entries[0].files), [file]);
+  assert.strictEqual(entries[0].files[file].id, sha('first draft\n'));
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'context', `${sha('first draft\n')}.bin`), 'utf8'), 'first draft\n');
+  // The file changes after the message: its new contents are recorded, in an entry of their own, once.
+  write(file, 'second draft\n');
+  save('c', Date.now(), [user('one'), ...wrote('t1', file)]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 2);
+  assert.deepStrictEqual(entries[1].messages, []);
+  assert.strictEqual(entries[1].files[file].id, sha('second draft\n'));
+  // A new message while the file is the same: its entry carries the file, and no entry of its own comes with it.
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 3);
+  assert.strictEqual(entries[2].files[file].id, sha('second draft\n'));
+  // The panel shows the files with the parts.
+  const cat = sentContext.panelCategory(path.join(dir), meta());
+  assert.ok(cat.items.some((i) => i.id === `sent:file:${file}` && i.text.includes('second draft')));
+});
+
+test('a file the chat wrote with credentials in it is stored with them replaced', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const file = path.join(root, 'notes.md');
+  const token = `ghp_${'a'.repeat(36)}`;
+  write(file, `clone with ${token}\n`);
+  save('c', Date.now(), [{ role: 'user', content: '<user_query>\none\n</user_query>' }, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 't1', toolName: 'Write', args: { path: file, contents: '' } }] }, { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', result: `Wrote contents to ${file}` }] }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const f = entry.files[file];
+  assert.strictEqual(f.redacted.count, 1);
+  assert.strictEqual(f.id, crypto.createHash('sha256').update(`clone with ${token}\n`).digest('hex'), 'the id is the sha256 of the bytes read');
+  assert.strictEqual(sentContext.loadFile(path.join(dir), f.id), `clone with [redacted]\n`);
+  assert.ok(!fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8').includes(token));
+  assert.ok(!fs.readdirSync(path.join(dir, 'context')).some((n) => fs.readFileSync(path.join(dir, 'context', n), 'utf8').includes(token)));
+});
+
+test('a message is matched with the context as it was when it was sent: its user bubble gives the time', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const T1 = Date.now() - 600e3;
+  const T2 = Date.now() - 300e3;
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  put('bubbleId:c:b1', JSON.stringify({ type: 1, text: 'one', createdAt: new Date(T1).toISOString() }));
+  put('bubbleId:c:b2', JSON.stringify({ type: 1, text: 'two', createdAt: new Date(T2).toISOString() }));
+  save('c', T2 + 1000, [user('one'), user('two')]);
+  // The server fails to connect between the two messages: the second one is sent without its tools.
+  const logs = path.join(root, 'logs');
+  write(path.join(logs, launchName(T1), 'mcp-server-srv.log'), `${logTime(T2 - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: T2 + 2000, cursorLogsDir: logs } });
+  const entries = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext;
+  assert.deepStrictEqual(entries.map((e) => [e.messageAt, e.messages]), [[T1, [hashOf(user('one'))]], [T2, [hashOf(user('two'))]]]);
+  const srvTools = (e) => (rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${e.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors.find((d) => d.server_identifier === 'srv').tools || []).length;
+  assert.strictEqual(srvTools(entries[0]), 2);
+  assert.strictEqual(srvTools(entries[1]), 0);
+});
+
+test('only the files a Write reported writing count: not a failed one, an edit, or a read', () => {
+  const write = (callId, p, result) => [
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: callId, toolName: 'Write', args: { path: p, contents: '' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: callId, result }] },
+  ];
+  const hashes = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+  const messages = {
+    h1: write('a', '/w/ok.md', 'Wrote contents to /w/ok.md')[0],
+    h2: write('a', '/w/ok.md', 'Wrote contents to /w/ok.md')[1],
+    h3: write('b', '/w/failed.md', 'Error: Tool failed')[0],
+    h4: write('b', '/w/failed.md', 'Error: Tool failed')[1],
+    h5: { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'StrReplace', args: { path: '/w/edited.md', old_string: 'a', new_string: 'b' } }] },
+    h6: { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'd', toolName: 'Read', args: { path: '/w/read.md' } }] },
+  };
+  assert.deepStrictEqual(sentContext.writtenFiles(hashes, (h) => messages[h]), ['/w/ok.md']);
+});
+
 // Cursor's log time (local, as the machine's clock) for a Date's epoch ms, and a launch folder's name.
 const logTime = (ms) => {
   const d = new Date(ms);
@@ -522,6 +622,26 @@ const logTime = (ms) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
 };
 const launchName = (ms) => logTime(ms).replace(/[-: ]/g, '').replace(/\.\d+$/, '').replace(/(\d{8})(\d{6})/, '$1T$2');
+
+test('a server that connected again after its failure is connected; one that failed last, just before, is not', (t) => {
+  const logs = path.join(tmp(t), 'logs');
+  const at = new Date(2026, 9, 10, 14, 45, 30).getTime();
+  const launch = path.join(logs, '20261010T144508');
+  // Its own log: failed, then "Successfully connected" ten seconds before the time (no note of it in the workbench logs).
+  write(path.join(launch, 'mcp-server-back.log'), [
+    `${logTime(at - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed`,
+    `${logTime(at - 10e3)} [info] Successfully connected to streamableHttp server`,
+  ].join('\n') + '\n');
+  // A client outcome of success after a failure in the workbench log; a failure a few seconds before the time.
+  write(path.join(launch, 'window1', 'workbench.mcp.files.log'), [
+    `${logTime(at - 50e3)} [error] [MCPService] createClient completed for server: flaky, connected=false, statusType=error, error=x`,
+    `${logTime(at - 40e3)} [info] [MCPService] createClient completed for server: flaky, statusType=initializing, success=true`,
+  ].join('\n') + '\n');
+  write(path.join(launch, 'mcp-server-down.log'), `${logTime(at - 5e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  write(path.join(launch, 'mcpprocess.log'), `${logTime(at - 4e3)} [info] stopped connection: stopped\n`);
+  const connections = mcpConnections.connectionsAt(logs, at);
+  assert.deepStrictEqual([...connections].sort(), [['back', true], ['down', false], ['flaky', true], ['stopped', false]]);
+});
 
 test('a server is connected at a time when the last connection evidence before it says so', (t) => {
   const logs = path.join(tmp(t), 'logs');
@@ -538,7 +658,8 @@ test('a server is connected at a time when the last connection evidence before i
   write(path.join(logs, '20261010T143441', 'window1', 'workbench.mcp.files.log'), `${logTime(at + 10e3)} [info] createClient completed for server: ide, connected=true, statusType=connected\n`);
   write(path.join(logs, '20261010T100000', 'mcp-server-old.log'), `${logTime(at - 3600e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
   const connections = mcpConnections.connectionsAt(logs, at);
-  assert.deepStrictEqual([...connections].sort(), [['ide', false], ['old', false], ['srv', true]]);
+  // The failure an hour before says nothing now (a server that recovered is not logged again): 'old' is left out.
+  assert.deepStrictEqual([...connections].sort(), [['ide', false], ['srv', true]]);
   assert.strictEqual(mcpConnections.isConnected(connections, 'never-seen'), true);
   assert.strictEqual(mcpConnections.isConnected(connections, 'ide'), false);
   assert.strictEqual(mcpConnections.connectionsAt(path.join(logs, 'missing'), at), undefined);

@@ -7,19 +7,22 @@
 // <history>/context/<sha256>.redacted.bin  the same, when it held credentials: replaced (redact.cjs);
 //                                  the name keeps the sha256 of the bytes before, the one to compare
 // <history>/context/<sha256>.md    the same part, readable (collapsed sections, nothing cut)
-// <chat>/meta.json  sentContext    per user message: the part ids, when and how they were rebuilt
+// <history>/context/<sha256>.bin   a file the chat wrote, as it is on disk (the id: its bytes' sha256)
+// <chat>/meta.json  sentContext    per user message: the part ids, when and how they were rebuilt, and
+//                                  the files the chat wrote (`files`: path -> id), see writtenFiles
 //
 // Cursor keeps none of it, so the parts are rebuilt from their sources (contextSources.cjs) when
 // the recorder sees a new user message, shortly after it was sent. A part is only "what Cursor
 // sent" when its sha256 is one Cursor used; `storedByCursor` lists parts Cursor itself kept in agentKv under that id.
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const rc = require('./requestContext.cjs');
 const sources = require('./contextSources.cjs');
 const mcpConnections = require('./mcpConnections.cjs');
-const { redactValue } = require('./redact.cjs');
+const { redactText, redactValue } = require('./redact.cjs');
 
 // A message is matched with a rebuild made at most this long after it: later, the sources (rule
 // files, skills...) are more likely to have changed since the message was sent.
@@ -239,16 +242,78 @@ function rebuild(folders, options, cache, db, dir, at) {
 
 // Called by the recorder for a new snapshot of a (root) chat. Returns the entry to add to
 // meta.sentContext, or undefined. options: { enabled, now, maxAgeMs, appDir, home, cache }.
-function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db }, options = {}) {
-  if (!options.enabled) return undefined;
+// The entries to add to meta.sentContext: one per send time of the new user messages (a message is
+// matched with the parts as they were when it was sent: see sendTimes), and one with no message when
+// only the files the chat wrote changed. input.previousSent: the chat's entries so far (the files last
+// recorded are compared with); input.composerId: the chat (its user bubbles give the send times).
+function record({ dir, composer, composerId, hashes, seenBefore, readMessage, userBlocks, db, previousSent }, options = {}) {
+  if (!options.enabled) return [];
   const now = options.now ?? Date.now();
   const maxAge = options.maxAgeMs ?? LIVE_MS;
-  if (now - composer.lastUpdatedAt > maxAge) return undefined;
+  if (now - composer.lastUpdatedAt > maxAge) return [];
   const messages = newUserMessages(hashes, seenBefore, readMessage, userBlocks);
-  if (!messages.length) return undefined;
+  // The files the chat wrote, as they are on disk now: recorded again when they change, even with no new message.
+  const written = writtenContents(dir, writtenFiles(hashes, readMessage));
+  const changed = !sameFiles(written, lastFiles(previousSent));
+  if (!messages.length && !changed) return [];
+  if (!messages.length) return [{ messages: [], messageAt: composer.lastUpdatedAt, rebuiltAt: now, source: 'rebuilt', files: written }];
   const folders = sources.workspaceFolders(composer.workspaceIdentifier);
-  const built = rebuild(folders, options, options.cache, db, dir, composer.lastUpdatedAt);
-  const entry = { messages, messageAt: composer.lastUpdatedAt, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
+  return [...sendTimes(db, composerId, messages, readMessage, composer.lastUpdatedAt)].sort((a, b) => a[0] - b[0])
+    .map(([at, group]) => messageEntry({ dir, db, options, folders, written, messages: group, at }));
+}
+
+// The new user messages by the time they were sent. Cursor creates a user bubble (type 1, with the
+// text typed, and its createdAt) when a message is sent, so a message is matched by its text to the
+// latest bubble with that text at or before the chat's last update. Without one: that update's time.
+function sendTimes(db, composerId, messages, readMessage, lastUpdatedAt) {
+  const bubbles = userBubbles(db, composerId);
+  const out = new Map();
+  for (const h of messages) {
+    const list = bubbles.get(userText(readMessage(h))) || [];
+    const at = [...list].reverse().find((t) => t <= lastUpdatedAt) ?? lastUpdatedAt;
+    if (!out.has(at)) out.set(at, []);
+    out.get(at).push(h);
+  }
+  return out;
+}
+
+// The user bubbles of a chat: text (trimmed) -> their createdAt times, in order.
+function userBubbles(db, composerId) {
+  const out = new Map();
+  if (!db || !composerId) return out;
+  let rows = [];
+  try {
+    rows = db.prepare('SELECT value FROM cursorDiskKV WHERE key LIKE ?').all(`bubbleId:${composerId}:%`);
+  } catch {
+    return out;
+  }
+  for (const r of rows) {
+    let b;
+    try {
+      b = JSON.parse(String(r.value));
+    } catch {
+      continue;
+    }
+    if (b.type !== 1 || typeof b.text !== 'string' || !b.createdAt) continue;
+    const text = b.text.trim();
+    out.set(text, [...(out.get(text) || []), Date.parse(b.createdAt)].sort((x, y) => x - y));
+  }
+  return out;
+}
+
+// The text a user message carries: its <user_query> block, or the whole text.
+function userText(m) {
+  const raw = !m ? '' : typeof m.content === 'string' ? m.content
+    : Array.isArray(m.content) ? m.content.filter((p) => p.type === 'text').map((p) => p.text || '').join('') : '';
+  const q = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/.exec(raw);
+  return (q ? q[1] : raw).trim();
+}
+
+// The entry for messages sent at `at`: the parts as they were rebuilt for that time, with the files.
+function messageEntry({ dir, db, options, folders, written, messages, at }) {
+  const built = rebuild(folders, options, options.cache, db, dir, at);
+  const entry = { messages, messageAt: at, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
+  if (Object.keys(written).length) entry.files = written;
   if (built.error) return { ...entry, error: redactValue(built.error).value };
   entry.parts = {};
   entry.storedByCursor = [];
@@ -271,6 +336,64 @@ function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db
   }
   if (built.notes.length) entry.notes = redactValue(built.notes).value;
   return entry;
+}
+
+// The files the chat wrote with its Write tool, in the order written: a Write whose result says it
+// wrote the file (a failed one, or one the user skipped, does not). Cursor's request context carries
+// the contents of these files (`file_contents`, by path), as the captured subagent runs show: each
+// file the agent wrote, and none it only read. StrReplace edits are not in the captured runs.
+function writtenFiles(hashes, readMessage) {
+  const pending = new Map();
+  const out = new Set();
+  for (const h of hashes) {
+    const m = readMessage(h);
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const p of m.content) {
+      if (p.type === 'tool-call' && p.toolName === 'Write' && p.args && typeof p.args.path === 'string') pending.set(p.toolCallId, p.args.path);
+      if (p.type === 'tool-result' && pending.has(p.toolCallId)) {
+        const file = pending.get(p.toolCallId);
+        pending.delete(p.toolCallId);
+        if (typeof p.result === 'string' && p.result.startsWith('Wrote contents to ')) out.add(file);
+      }
+    }
+  }
+  return [...out];
+}
+
+const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
+
+// The current contents of these files, read from disk now as Cursor's request context reads them:
+// { path: { id, bytes, redacted? } }, the id the sha256 of the bytes read. The stored copy has its
+// credentials replaced (redact.cjs), as the parts do. A file that is gone is left out.
+function writtenContents(dir, paths) {
+  const out = {};
+  for (const p of paths) {
+    let text;
+    try {
+      if (!fs.statSync(p).isFile()) continue;
+      text = fs.readFileSync(p, 'utf8');
+    } catch {
+      continue;
+    }
+    const bytes = Buffer.from(text, 'utf8');
+    const id = sha256(bytes);
+    const clean = redactText(text);
+    const redacted = clean.count ? { count: clean.count } : undefined;
+    writeOnce(path.join(dir, 'context', partFile(id, redacted)), Buffer.from(clean.text, 'utf8'));
+    out[p] = { id, bytes: bytes.length, ...(redacted ? { redacted } : {}) };
+  }
+  return out;
+}
+
+// The files last recorded for a chat: the latest entry with a files map.
+function lastFiles(previousSent) {
+  const last = [...(previousSent || [])].reverse().find((e) => e.files);
+  return last ? last.files : {};
+}
+
+function sameFiles(a, b) {
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((p) => b[p] && b[p].id === a[p].id);
 }
 
 function hasBlob(db, id) {
@@ -397,24 +520,47 @@ function chatSection(entry, contextDir) {
     + 'not verified against the bytes Cursor sent.';
   const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)',
     [...(entry.dynamicRedacted ? [redactedNote(entry.dynamicRedacted, false), ''] : []), fenced(JSON.stringify(entry.dynamic, null, 2), 'json')].join('\n'))] : [];
-  return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
+  const files = entry.files && Object.keys(entry.files).length ? [`- Files the chat wrote, as they were on disk (${filesNote(entry.files)})`] : [];
+  return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...files, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
+}
+
+// The files of an entry, for a line of text: paths and sizes.
+const filesNote = (files) => Object.entries(files).map(([p, f]) => `\`${html(p)}\`, ${f.bytes} bytes${f.redacted ? ', credentials redacted' : ''}`).join('; ');
+
+// A stored copy of a file the chat wrote (its text as recorded, with credentials replaced).
+function loadFile(dir, id) {
+  for (const redacted of [false, true]) {
+    const file = path.join(dir, 'context', partFile(id, redacted));
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+  }
+  return undefined;
 }
 
 // For the inspector panel: the latest recorded context of a chat, as a category of items.
 function panelCategory(dir, meta) {
-  const entry = [...((meta && meta.sentContext) || [])].reverse().find((e) => e.parts);
-  if (!entry) return undefined;
+  const list = [...((meta && meta.sentContext) || [])].reverse();
+  const entry = list.find((e) => e.parts);
+  const withFiles = list.find((e) => e.files && Object.keys(e.files).length);
+  if (!entry && !withFiles) return undefined;
   const items = [];
   for (const kind of rc.PARTS) {
-    const p = entry.parts[kind] && loadPart(dir, kind, entry.parts[kind].id);
+    const p = entry && entry.parts[kind] && loadPart(dir, kind, entry.parts[kind].id);
     if (!p) continue;
     const md = renderPart(kind, p.part, { id: p.id, bytes: entry.parts[kind].bytes, redacted: entry.parts[kind].redacted });
     items.push({ id: `sent:${kind}`, label: `${KIND_LABEL[kind]} (${entry.parts[kind].items})`, kind: 'sent_context', text: md, estimatedTokens: Math.ceil(md.length / 4), characterCount: md.length });
   }
+  if (withFiles) {
+    for (const [file, f] of Object.entries(withFiles.files)) {
+      const text = loadFile(dir, f.id);
+      if (text === undefined) continue;
+      items.push({ id: `sent:file:${file}`, label: `File written: ${path.basename(file)}`, kind: 'sent_context', text: `${file}\n\n${fenced(text)}`, estimatedTokens: Math.ceil(text.length / 4), characterCount: text.length });
+    }
+  }
+  const at = (entry || withFiles).messageAt;
   return {
     id: 'sent_context', label: 'Sent with the request, rebuilt (not in the prompt)', estimatedTokens: 0, source: 'history',
-    note: `Rebuilt from their sources for the message at ${new Date(entry.messageAt).toISOString()}; not part of Cursor's context usage.`, items,
+    note: `Rebuilt from their sources at ${new Date(at).toISOString()}; not part of Cursor's context usage. Files are the ones the chat wrote, as they were on disk then; Cursor sends them only when it asks for the request context.`, items,
   };
 }
 
-module.exports = { LIVE_MS, record, loadPart, partStrings, renderPart, chatSection, panelCategory, KIND_LABEL };
+module.exports = { LIVE_MS, record, loadPart, loadFile, partStrings, renderPart, chatSection, panelCategory, KIND_LABEL, writtenFiles };

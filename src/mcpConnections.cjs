@@ -7,21 +7,30 @@
 // and 13 (their connection attempts had failed: see below).
 //
 // Evidence, per server, in time order (the log lines are in local time, as the machine's clock):
-//   "createClient completed for server: <id>, connected=true|false" in the workbench logs
-//     (window*/workbench.mcp.files.log, window*/mcp-server-<id>.workbench.log): the outcome of an attempt;
-//   "Transient error connecting to streamableHttp server" in <launch>/mcp-server-<id>.log: a failed attempt.
-// The last of that evidence before the time decides. A server with none before it is taken as
-// connected: Cursor's built-in servers log nothing here, and they are the usual case.
+//   "createClient completed for server: <id>, connected=... | statusType=..., success=..." in the workbench
+//     logs (window*/workbench.mcp.files.log, window*/mcp-server-<id>.workbench.log): the outcome of a client;
+//   "Successfully connected to streamableHttp server" and "Transient error connecting to streamableHttp
+//     server" in <launch>/mcp-server-<id>.log: a connection's outcome (the server's own log);
+//   "stopped connection: <id>" (the MCP process logs): stopped, so not connected.
+// The last of that evidence before the time decides, if it is recent: a server that failed while Cursor
+// retried it (every few seconds to a few tens of seconds in the captured logs) is down until it
+// connects again; but a server that recovered is not logged again, so a failure more than RECENT_MS
+// before the time says nothing. A server with no recent evidence is taken as connected: Cursor's
+// built-in servers log nothing here, and they are the usual case.
 
 const fs = require('node:fs');
 const path = require('node:path');
 
 const LAUNCH = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/;
 const LINE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3}) /;
-const OUTCOME = /createClient completed for server: ([^,\s]+), connected=(true|false)/;
+const OUTCOME = /createClient completed for server: ([^,\s]+), (?:connected=(true|false)|statusType=\w+, success=(true|false))/;
+const CONNECTED = /Successfully connected to streamableHttp server/;
 const TRANSIENT = /Transient error connecting to streamableHttp server/;
+const STOPPED = /stopped connection: ([^\s,]+)/;
 // Launches to read: the latest ones that started before the time (an event before it is in one of them).
 const LAUNCHES = 4;
+// A failure this long before the time still means the server is down (see the header).
+const RECENT_MS = 3 * 60 * 1000;
 
 function readLines(file) {
   try {
@@ -55,7 +64,7 @@ function logFiles(launch) {
     return out;
   }
   for (const n of names) {
-    if (/^mcp-server-.+\.log$/.test(n) && !n.endsWith('.workbench.log')) out.push(path.join(launch, n));
+    if ((/^mcp-server-.+\.log$/.test(n) && !n.endsWith('.workbench.log')) || n === 'mcpprocess.log') out.push(path.join(launch, n));
     if (/^window\d+$/.test(n)) {
       try {
         for (const f of fs.readdirSync(path.join(launch, n))) {
@@ -83,20 +92,29 @@ function evidence(logsDir, at) {
         const when = new Date(`${t[1]}T${t[2]}`).getTime();
         if (!Number.isFinite(when) || when > at) continue;
         const outcome = OUTCOME.exec(line);
-        if (outcome) events.push({ at: when, server: outcome[1], up: outcome[2] === 'true' });
+        const stopped = STOPPED.exec(line);
+        if (outcome) events.push({ at: when, server: outcome[1], up: (outcome[2] ?? outcome[3]) === 'true' });
+        else if (own && CONNECTED.test(line)) events.push({ at: when, server: own[1], up: true });
         else if (own && TRANSIENT.test(line)) events.push({ at: when, server: own[1], up: false });
+        else if (stopped) events.push({ at: when, server: stopped[1], up: false });
       }
     }
   }
   return events.sort((a, b) => a.at - b.at);
 }
 
-// { server id: connected (true | false) } at the time, from the evidence before it; undefined when
-// no launch of Cursor is in the logs (nothing is known: every server is taken as connected).
+// { server id: false (not connected) or true (connected: its last outcome was a success) } at the
+// time; a server with no recent evidence is left out. undefined when no launch of Cursor is in the
+// logs (nothing is known: every server is taken as connected).
 function connectionsAt(logsDir, at) {
   if (!launchesBefore(logsDir, at).length) return undefined;
+  const last = new Map();
+  for (const e of evidence(logsDir, at)) last.set(e.server, e);
   const out = new Map();
-  for (const e of evidence(logsDir, at)) out.set(e.server, e.up);
+  for (const [server, e] of last) {
+    if (e.up) out.set(server, true);
+    else if (at - e.at <= RECENT_MS) out.set(server, false);
+  }
   return out;
 }
 

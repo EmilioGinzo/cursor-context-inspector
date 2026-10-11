@@ -329,9 +329,10 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   // A subagent's messages carry the same context parts as the root's (the wire shows the same
   // blob ids). A message seen before its blob was written is new when the blob arrives.
   const sent = sentContext.record({
-    dir, composer: { ...composer, workspaceIdentifier: workspaceIdentifierOf(db, composer) }, hashes, db, userBlocks,
+    dir, composer: { ...composer, workspaceIdentifier: workspaceIdentifierOf(db, composer) }, composerId, hashes, db, userBlocks,
     seenBefore: new Set((previous.seen || []).filter((h) => !fetched.has(h))),
     readMessage: (hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined),
+    previousSent: previous.sentContext || [],
   }, full ? options.sentContext : undefined);
   // Unchanged since the last snapshot. Mid-run the messages change while lastUpdatedAt
   // stays at the send time, so the messages are compared, not only the time.
@@ -342,7 +343,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     if (meta.seen) {
       const seenBefore = meta.seen.length;
       remember(meta);
-      if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+      if (sent.length) meta.sentContext = [...(meta.sentContext || []), ...sent];
       if (index) meta.scannedCalls = [...scanned, ...callsDone];
       if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
       applyScanPending(meta, dir, composerId, callWaiting, replyWaiting);
@@ -352,7 +353,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
       }
       const relinked = addToolCallId(meta, composer);
       const changed = meta.seen.length !== seenBefore;
-      if (sent || index || changed || relinked || replyMarks.length || waiting.calls || waiting.replies) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+      if (sent.length || index || changed || relinked || replyMarks.length || waiting.calls || waiting.replies) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       // The late message may be the one a thinking belongs to.
       if (fetched.size || changed) {
         if (standard) recordThinking(db, dir, chatDir, meta, turns, composerId);
@@ -384,7 +385,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     categories: breakdown.categories || [],
     summaries,
     messages: hashes,
-    ...(sent ? { sentContext: sent } : {}),
+    ...(sent.length ? { sentContext: sent } : {}),
   };
   // latest.json at every level: it marks the update as recorded.
   if (standard) written += writeSnapshot(chatDir, changedAt(composer), snapshot);
@@ -409,7 +410,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     totalUsedTokens: snapshot.totalUsedTokens,
     snapshots: (meta.snapshots || 0) + written,
   });
-  if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+  if (sent.length) meta.sentContext = [...(meta.sentContext || []), ...sent];
   addToolCallId(meta, composer);
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
   if (standard) recordThinking(db, dir, chatDir, meta, turns, composerId);

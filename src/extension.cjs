@@ -278,7 +278,7 @@ class Inspector {
         this.chatId = (await this.focusedChatId(db)) || (refocus && this.chatId) || (chats[0] && chats[0].id);
       }
       if (!this.chatId) return this.post({ type: 'error', message: 'No Cursor agent chats with context data were found.' });
-      const ctx = store.loadContext(db, this.chatId);
+      const ctx = store.loadContext(db, this.chatId, (id) => (readMeta(id) || {}).toolCallIds || []);
       const sent = sentContext.panelCategory(historyDir(), readMeta(this.chatId));
       if (sent) ctx.categories.push(sent);
       this.loadedAt = ctx.lastUpdatedAt;

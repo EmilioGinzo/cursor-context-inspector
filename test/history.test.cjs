@@ -176,7 +176,7 @@ function multi() {
   chat('root', 1000, [sys, first, spawn('tool_aaa')], { subagentComposerIds: ['child'] });
   chat('child', 1001, [sys, { role: 'user', content: 'child task' }, spawn('tool_bbb')], { subagentComposerIds: ['grandchild'], ...sub('root', 'tool_aaa') });
   chat('grandchild', 1002, [sys, { role: 'user', content: 'grandchild task' }], sub('child', 'tool_bbb', 'generalPurpose'));
-  return { db, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-history-')) };
+  return { db, chat, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-history-')) };
 }
 
 test('subagents are stored inside their parent folder, nested, and linked where spawned', () => {
@@ -200,6 +200,28 @@ test('subagents are stored inside their parent folder, nested, and linked where 
   assert.strictEqual(index.length, 1);
   assert.strictEqual(index[0].subagents[0].subagents[0].composerId, 'grandchild');
   assert.strictEqual(index[0].subagents[0].path, path.join('chats', 'root', 'subagents', 'child'));
+});
+
+test('a resumed subagent keeps every Task call that spawned it, and is linked from each', () => {
+  const { db, chat, dir } = multi();
+  const sys = { role: 'system', content: 'You are an agent.' };
+  const spawnBy = (callId) => ({ role: 'assistant', content: [{ type: 'text', text: 'delegating' }, { type: 'tool-call', toolName: 'Subagent', toolCallId: callId, args: { prompt: 'go' } }] });
+  history.recordUpdatedSince(db, dir, 0);
+  const root = path.join(dir, 'chats', 'root');
+  const childMeta = path.join(root, 'subagents', 'child', 'meta.json');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(childMeta, 'utf8')).toolCallIds, ['tool_aaa']);
+
+  // Cursor now names the second Task call (a resume) and drops the first one from the subagent.
+  // The subagent's last update is unchanged, so only its link moved.
+  chat('child', 1001, [sys, { role: 'user', content: 'child task' }, spawnBy('tool_bbb')], { subagentComposerIds: ['grandchild'], subagentInfo: { parentComposerId: 'root', toolCallId: 'tool_ccc', subagentTypeName: 'explore' } });
+  chat('root', 1003, [sys, { role: 'user', content: 'first' }, spawnBy('tool_aaa'), { role: 'user', content: 'again' }, spawnBy('tool_ccc')], { subagentComposerIds: ['child'] });
+  history.recordChat(db, 'root', dir);
+
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(childMeta, 'utf8')).toolCallIds, ['tool_aaa', 'tool_ccc'], 'kept, not overwritten');
+  const rootMd = fs.readFileSync(path.join(root, 'transcript.md'), 'utf8');
+  assert.strictEqual(rootMd.split('↳ Subagent: [child]').length - 1, 2, 'linked from both Task calls');
+  const chatMd = fs.readFileSync(path.join(root, 'chat.md'), 'utf8');
+  assert.strictEqual(chatMd.split('↳ Subagent: [child]').length - 1, 2, 'chat.md links both too');
 });
 
 test('flat layout from earlier versions is moved under the parent', () => {

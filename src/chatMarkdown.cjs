@@ -63,7 +63,7 @@ const encryptedBytes = (p) => Buffer.from(String(p.data || ''), 'base64').length
 const seconds = (ms) => (typeof ms === 'number' ? ` · ${ms < 1000 ? '<1' : Math.round(ms / 1000)} s` : '');
 
 // meta: { name, composerId, model, workspace, createdAt, lastUpdatedAt }.
-// messages: in first-seen order. subagents: [{ name, type, toolCallId, folder }].
+// messages: in first-seen order. subagents: [{ name, type, toolCallIds, folder }].
 // thinking: aligned with messages, the readable thinking Cursor kept for each (history.cjs
 // thinking.json): [{ text, durationMs, part, unplaced }], part the index of its reasoning part.
 // sentContext: per message, the context recorded as sent with it (files under contextDir).
@@ -72,7 +72,7 @@ function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [], s
   for (const m of messages) {
     if (m.role === 'tool') for (const p of parts(m)) if (p.toolCallId) results.set(p.toolCallId, p);
   }
-  const spawned = (id) => subagents.filter((s) => s.toolCallId && id && (id.includes(s.toolCallId) || s.toolCallId.includes(id)));
+  const spawned = (id) => subagents.filter((s) => id && (s.toolCallIds || []).some((c) => id.includes(c) || c.includes(id)));
   const subLink = (s) => (s.folder ? `[${s.name || 'Untitled subagent'}](subagents/${encodeURIComponent(s.folder)}/chat.md)` : s.name || 'Untitled subagent');
 
   const out = [`# ${meta.name || 'Untitled chat'}`, ''];

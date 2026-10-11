@@ -230,10 +230,9 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
     && (latest.messages || []).join() === hashes.join()) {
     const meta = previous;
-    if (sent && meta.seen) {
-      meta.sentContext = [...(meta.sentContext || []), sent];
-      writeAtomic(metaFile, JSON.stringify(meta, null, 2));
-    }
+    if (sent && meta.seen) meta.sentContext = [...(meta.sentContext || []), sent];
+    const relinked = addToolCallId(meta, composer);
+    if (meta.seen && (sent || relinked)) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
     // The late message may be the one a thinking belongs to.
     if (fetched.size && meta.seen) {
       recordThinking(db, dir, chatDir, meta, composer.conversationState);
@@ -286,10 +285,21 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     snapshots: (meta.snapshots || 0) + written,
   });
   if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+  addToolCallId(meta, composer);
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
   recordThinking(db, dir, chatDir, meta, composer.conversationState);
   writeTranscript(db, dir, chatDir, meta, hashes);
   return recorded + 1;
+}
+
+// The parent's Task call that spawned a subagent. Cursor keeps only the latest one (a resumed
+// subagent is called again), so each one the recorder sees is added to meta.toolCallIds, and
+// none is dropped. Returns whether one was added.
+function addToolCallId(meta, composer) {
+  const id = composer.subagentInfo && composer.subagentInfo.toolCallId;
+  if (!id || (meta.toolCallIds || []).includes(id)) return false;
+  meta.toolCallIds = [...(meta.toolCallIds || []), id];
+  return true;
 }
 
 // Cursor keeps only the chat's newest state, but the states it went through are prefixes of it:
@@ -328,7 +338,9 @@ function recordThinking(db, dir, chatDir, meta, conversationState) {
 
 function writeTranscript(db, dir, chatDir, meta, currentHashes) {
   const folders = new Map([...folderOwners(path.join(chatDir, 'subagents'))].map(([entry, id]) => [id, entry]));
-  const subagents = store.loadSubagents(db, meta.subagentIds || []).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
+  // The tool calls each subagent's own meta.json kept (see addToolCallId).
+  const known = (id) => (folders.has(id) ? readJson(path.join(chatDir, 'subagents', folders.get(id), 'meta.json'), {}).toolCallIds || [] : []);
+  const subagents = store.loadSubagents(db, meta.subagentIds || [], known).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
   const thinking = readJson(path.join(chatDir, 'thinking.json'), []);
   writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
@@ -370,6 +382,7 @@ function rebuildTranscripts(db, dir) {
       if (composer.subagentInfo) {
         meta.parentComposerId = composer.subagentInfo.parentComposerId;
         meta.subagentType = composer.subagentInfo.subagentTypeName;
+        addToolCallId(meta, composer);
       }
       writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       for (const id of meta.subagentIds || []) recordChat(db, id, dir);
@@ -405,10 +418,11 @@ function transcript(dir, meta, current, subagents = [], parent, thinking = []) {
     ...subagents.map((s) => `  - ${subLink(s)}`),
     '',
   ].filter((l) => l !== undefined);
-  // Subagents are linked where they were spawned: the tool call carrying their toolCallId.
+  // Subagents are linked where they were spawned: the tool call carrying one of their toolCallIds
+  // (a resumed subagent is linked from each Task call that resumed it).
   const spawnedBy = (message) => {
     const ids = Array.isArray(message.content) ? message.content.map((p) => p.toolCallId).filter(Boolean) : [];
-    return subagents.filter((s) => s.toolCallId && ids.some((id) => id.includes(s.toolCallId) || s.toolCallId.includes(id)));
+    return subagents.filter((s) => (s.toolCallIds || []).some((c) => ids.some((id) => id.includes(c) || c.includes(id))));
   };
   // The readable thinking Cursor kept for a message, quoted after it: it is not prompt text.
   const thoughts = (hash) => thinking.filter((e) => e.message === hash).map((e) => {

@@ -442,7 +442,8 @@ function untracked(item) {
 
 // --- public ----------------------------------------------------------------------
 
-function loadContext(db, composerId) {
+// known: see loadSubagents (the tool calls the recorder kept for each subagent).
+function loadContext(db, composerId, known) {
   const raw = getValue(db, `composerData:${composerId}`);
   if (raw === undefined) throw new Error(`Chat ${composerId} not found`);
   const composer = JSON.parse(raw);
@@ -473,7 +474,7 @@ function loadContext(db, composerId) {
   });
 
   const rawMessages = messages.map((m, i) => textItem(`raw${i}`, `#${i} ${m.role}`, m.role, messageText(m)));
-  const subagents = loadSubagents(db, composer.subagentComposerIds || []);
+  const subagents = loadSubagents(db, composer.subagentComposerIds || [], known);
   linkSubagents(categories.find((c) => c.id === 'conversation').items, subagents);
   const info = composer.subagentInfo;
 
@@ -513,8 +514,10 @@ function ancestors(db, composerId) {
 }
 
 // Subagent chats are full chats of their own; subagentInfo.toolCallId is the
-// parent's tool call that spawned each one.
-function loadSubagents(db, ids) {
+// parent's tool call that spawned each one. Cursor keeps only the latest: a resumed subagent
+// is called again by another Task call. known(composerId) lists the ids the recorder kept
+// before (oldest first); toolCallIds has them all, the latest from Cursor last.
+function loadSubagents(db, ids, known = () => []) {
   if (!ids.length) return [];
   const get = db.prepare(`
     SELECT json_extract(value, '$.name') AS name,
@@ -530,7 +533,9 @@ function loadSubagents(db, ids) {
   return ids
     .map((id) => {
       const r = get.get(`composerData:${id}`);
-      return r && { composerId: id, ...r, hasContext: !!r.hasContext, nested: r.nested || 0 };
+      if (!r) return undefined;
+      const toolCallIds = [...new Set([...known(id), r.toolCallId].filter(Boolean))];
+      return { composerId: id, ...r, toolCallIds, hasContext: !!r.hasContext, nested: r.nested || 0 };
     })
     .filter(Boolean);
 }
@@ -538,9 +543,9 @@ function loadSubagents(db, ids) {
 // Tree ids embed the tool call id ("tool_call_pair:<msg>:<callId>…"); parsed
 // items carry toolCallIds. Cursor may store a truncated id, so match by prefix.
 function linkSubagents(items, subagents) {
-  const withCall = subagents.filter((s) => s.toolCallId);
+  const withCall = subagents.filter((s) => s.toolCallIds && s.toolCallIds.length);
   if (!withCall.length) return;
-  const matches = (ids) => withCall.filter((s) => ids.some((id) => id.includes(s.toolCallId) || s.toolCallId.includes(id)));
+  const matches = (ids) => withCall.filter((s) => ids.some((id) => s.toolCallIds.some((c) => id.includes(c) || c.includes(id))));
   const walk = (list) => {
     for (const item of list) {
       const ids = item.toolCallIds || (item.kind === 'tool_call_pair' ? [item.id] : []);

@@ -273,8 +273,10 @@ found), and every other server's tools by name
 with their annotations (`readOnlyHint` and the like), plus each server's
 folder and tool files. Annotations are not in the snapshots; they are read from
 the copies Cursor kept of this part in its database (`context/tool-annotations.json`,
-rescanned hourly). Servers change them, so a tool can have several values there: the one
-stored last is used, a note says so, and every value is kept in that file.
+rescanned hourly, and at once when a tool sent has no annotation yet). Servers change
+them, so a tool can have several values there: the one stored last is used, a note
+says so, and every value is kept in that file. Each count is of distinct stored parts,
+so a rescan does not count one twice.
 
 A rebuilt part is what Cursor sent only when their sha256 match.
 `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of

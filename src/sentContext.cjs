@@ -76,25 +76,34 @@ function pluginIds(db, dir, plugins, now) {
 // parts it stored in agentKv (the server asked for those bytes), so they are read from there, at most
 // once an hour, and remembered in context/tool-annotations.json. Servers change them (a title was
 // renamed in the captured runs): every distinct value is kept with its count and the row it was last
-// seen in, and the one stored last is used. Blob rows are written once, so each scan reads only the
-// rows after the last one it saw.
+// seen in, and the one stored last is used. A tool the request sends with no value yet triggers a
+// scan at once (it is new since the last one).
+//
+// Counts are of distinct blobs: a blob is a part Cursor stored under its sha256, so it is counted
+// once, however many scans read it (`seen` keeps the keys read). Rows are read after the newest one
+// the last scan saw (`top`: its rowid and key). A VACUUM renumbers rows, and a row can be deleted:
+// when the top row is no longer at its rowid, the table is read again, and the rows already seen are
+// skipped; the rowids of each value's last blob are looked up again, so the order stays the stored one.
 const ANNOTATION_RESCAN_MS = 60 * 60 * 1000;
 
 // { annotations: Map of key -> annotations_json (the last stored), conflicts: tools with more than one value }.
-// File: { scannedAt, lastRowid, tools: { key: { annotations_json: { count, lastRowid } } } }.
-function toolAnnotations(db, dir, now) {
+// File: { scannedAt, lastRowid, top: { rowid, key }, seen: [blob keys],
+//         tools: { key: { annotations_json: { count, lastRowid, lastKey } } } }.
+// wanted: the keys (sources.annotationKey) of the tools the request sends now.
+function toolAnnotations(db, dir, now, wanted = []) {
   const file = path.join(dir, 'context', 'tool-annotations.json');
-  let known = { scannedAt: 0, lastRowid: 0, tools: {} };
+  let known = { scannedAt: 0, lastRowid: 0, seen: [], tools: {} };
   try {
     known = { ...known, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
-    known.tools = mergeAnnotations(known.tools, {});
   } catch {
     /* none yet */
   }
-  if (now - known.scannedAt >= ANNOTATION_RESCAN_MS) {
-    const found = scanAnnotations(db, known.lastRowid);
-    known = { scannedAt: now, lastRowid: found.lastRowid, tools: mergeAnnotations(known.tools, found.tools) };
-    writeAtomic(file, JSON.stringify(known, null, 2));
+  known.tools = normalizeTools(known.tools);
+  const missing = wanted.some((key) => !known.tools[key]);
+  if (now - known.scannedAt >= ANNOTATION_RESCAN_MS || missing) {
+    const next = scanInto(db, known, now);
+    if (JSON.stringify(next) !== JSON.stringify(known)) writeAtomic(file, JSON.stringify(next, null, 2));
+    known = next;
   }
   const annotations = new Map();
   let conflicts = 0;
@@ -106,19 +115,56 @@ function toolAnnotations(db, dir, now) {
   return { annotations, conflicts };
 }
 
-// Rows after `after` (up to the newest one now): { tools: { key: { json: { count, lastRowid } } }, lastRowid }.
-function scanAnnotations(db, after) {
-  let top = after;
+// Earlier files kept one string per tool, which counts once.
+function normalizeTools(tools = {}) {
+  const out = {};
+  for (const [key, values] of Object.entries(tools)) out[key] = typeof values === 'string' ? { [values]: { count: 1, lastRowid: 0 } } : { ...values };
+  return out;
+}
+
+const rowidOf = (db, key) => {
+  try {
+    const r = db.prepare('SELECT rowid AS id FROM cursorDiskKV WHERE key = ?').get(key);
+    return r ? r.id : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// The state after reading the rows the last scan had not seen (or all of them, when renumbered).
+function scanInto(db, known, now) {
+  const seen = new Set(known.seen || []);
+  const tools = known.tools;
+  let top;
+  try {
+    top = db.prepare('SELECT rowid AS id, key FROM cursorDiskKV ORDER BY rowid DESC LIMIT 1').get();
+  } catch {
+    return { ...known, scannedAt: now };
+  }
+  // The last scan's top row, if it is still there at its rowid: rows after it are new. Otherwise the
+  // table was renumbered (a VACUUM) or lost rows: all of it is read again.
+  const renumbered = known.top !== undefined && rowidOf(db, known.top.key) !== known.top.rowid;
+  // Earlier files have no top: they are read after the rowid they kept.
+  const after = known.top === undefined ? known.lastRowid : renumbered ? 0 : known.top.rowid;
+  if (renumbered) {
+    for (const values of Object.values(tools)) {
+      for (const e of Object.values(values)) {
+        const r = e.lastKey !== undefined ? rowidOf(db, e.lastKey) : undefined;
+        if (r !== undefined) e.lastRowid = r;
+      }
+    }
+  }
+  const upTo = top ? top.id : after;
   let rows = [];
   try {
-    top = db.prepare('SELECT max(rowid) AS top FROM cursorDiskKV').get().top ?? after;
-    if (top < after) return scanAnnotations(db, 0); // the table was rebuilt: read it all again
-    rows = db.prepare("SELECT rowid AS id, value FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? AND key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all(after, top);
+    rows = db.prepare("SELECT rowid AS id, key, value FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? AND key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all(after, upTo);
   } catch {
-    return { tools: {}, lastRowid: after };
+    /* read again next time */
+    return { ...known, scannedAt: now };
   }
-  const tools = {};
   for (const r of rows) {
+    if (seen.has(r.key)) continue;
+    seen.add(r.key);
     const data = Buffer.from(r.value);
     if (!rc.looksLikePart('mcps', data)) continue;
     const options = rc.decodePart('mcps', data).mcp_meta_tool_options;
@@ -128,28 +174,17 @@ function scanAnnotations(db, after) {
         const values = (tools[sources.annotationKey(d.server_identifier, t.tool_name)] ??= {});
         const e = (values[t.annotations_json] ??= { count: 0, lastRowid: 0 });
         e.count++;
-        e.lastRowid = Math.max(e.lastRowid, r.id);
+        if (r.id >= e.lastRowid) Object.assign(e, { lastRowid: r.id, lastKey: r.key });
       }
     }
   }
-  return { tools, lastRowid: top };
-}
-
-// Adds the counts of `found` to `known`, keeping every value either has (none is dropped).
-function mergeAnnotations(known, found) {
-  const out = {};
-  for (const [key, values] of Object.entries(known)) {
-    // Earlier files kept one string per tool: it counts once.
-    out[key] = typeof values === 'string' ? { [values]: { count: 1, lastRowid: 0 } } : { ...values };
-  }
-  for (const [key, values] of Object.entries(found)) {
-    out[key] = { ...(out[key] || {}) };
-    for (const [json, e] of Object.entries(values)) {
-      const old = out[key][json] || { count: 0, lastRowid: 0 };
-      out[key][json] = { count: old.count + e.count, lastRowid: Math.max(old.lastRowid, e.lastRowid) };
-    }
-  }
-  return out;
+  return {
+    scannedAt: now,
+    lastRowid: upTo,
+    top: top ? { rowid: top.id, key: top.key } : known.top,
+    seen: [...seen],
+    tools,
+  };
 }
 
 // Written beside the old file, then renamed over it: a crash leaves the last complete file.
@@ -187,7 +222,9 @@ function rebuild(folders, options, cache, db, dir, at) {
     const env = sources.environment({ ...options, connections: mcpConnections.connectionsAt(logs, at) });
     if (db) env.pluginIds = pluginIds(db, dir, sources.installedPlugins(env), Date.now());
     if (db) {
-      const annotations = toolAnnotations(db, dir, Date.now());
+      // The tools the request sends (their names, as the folders have them) decide whether to scan now.
+      const wanted = sources.annotationKeysOf(sources.mcpsPart(env, folders));
+      const annotations = toolAnnotations(db, dir, Date.now(), wanted);
       env.toolAnnotations = annotations.annotations;
       env.annotationConflicts = annotations.conflicts;
     }

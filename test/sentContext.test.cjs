@@ -442,6 +442,73 @@ test('the MCP servers sent inline are the set in Cursor\'s bundle (rFE), not a l
   assert.deepStrictEqual(parts.mcps.tools.map((x) => x.name), ['my-browser-open']);
 });
 
+test('annotation counts are of distinct parts: a rescan, or a VACUUM that renumbers the rows, counts them once', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const kept = (value) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools: [{ tool_name: 'alpha', annotations_json: value }, { tool_name: 'zeta' }] }] } });
+  // A row before the parts, deleted later: its gap is what a VACUUM closes, renumbering the parts.
+  put('junk', Buffer.from('not a part'));
+  put('agentKv:blob:a1', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a2', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a3', kept('{"readOnlyHint":false}'));
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  save('c', Date.now(), [user('one')]);
+  const dir = path.join(root, 'history');
+  const record = () => history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  const file = path.join(dir, 'context', 'tool-annotations.json');
+  const known = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const counts = () => Object.entries(known().tools[sources.annotationKey('srv', 'alpha')]).map(([v, e]) => [v, e.count]).sort();
+  const same = [['{"readOnlyHint":false}', 1], ['{"readOnlyHint":true}', 2]];
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // An hourly scan that is due reads the same rows again: nothing is counted twice.
+  fs.writeFileSync(file, JSON.stringify({ ...known(), scannedAt: 0 }));
+  save('c', Date.now(), [user('one'), user('two')]);
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // The junk row goes, and the rows are renumbered without their gap, as VACUUM may do (SQLite here keeps
+  // the rowids through VACUUM, so the renumbering is done by hand, in order). The rescan reads them again,
+  // counts none of them twice, and the value stored last is still the one used.
+  const rowOf = (key) => db.prepare('SELECT rowid AS id FROM cursorDiskKV WHERE key = ?').get(key).id;
+  const before = rowOf('agentKv:blob:a3');
+  db.prepare("DELETE FROM cursorDiskKV WHERE key = 'junk'").run();
+  let next = 1;
+  for (const r of db.prepare('SELECT rowid AS id, key FROM cursorDiskKV ORDER BY rowid').all()) {
+    db.prepare('UPDATE cursorDiskKV SET rowid = ? WHERE key = ?').run(next++, r.key);
+  }
+  assert.notStrictEqual(rowOf('agentKv:blob:a3'), before, 'the rows were renumbered');
+  fs.writeFileSync(file, JSON.stringify({ ...known(), scannedAt: 0 }));
+  save('c', Date.now(), [user('one'), user('two'), user('three')]);
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // The last stored value's row is the row it has now.
+  assert.strictEqual(known().tools[sources.annotationKey('srv', 'alpha')]['{"readOnlyHint":false}'].lastRowid, rowOf('agentKv:blob:a3'));
+});
+
+test('a tool the request sends that has no annotation yet is looked for at once, not at the next hourly scan', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const slug = ws.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  write(path.join(home, '.cursor', 'projects', slug, 'mcps', 'srv', 'tools', 'beta.json'), JSON.stringify({ name: 'beta', description: 'B.' }));
+  const { db, put, save } = chatDb(ws);
+  const kept = (tools) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools }] } });
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  put('agentKv:blob:a1', kept([{ tool_name: 'alpha', annotations_json: '{"readOnlyHint":true}' }]));
+  save('c', Date.now(), [user('one')]);
+  const dir = path.join(root, 'history');
+  const options = { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } };
+  const entries = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext;
+  const betaOf = (entry) => rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors[0].tools.find((x) => x.tool_name === 'beta');
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.strictEqual(betaOf(entries()[0]).annotations_json, undefined);
+  // The server's part with beta's annotation is stored after that scan, well within the hour.
+  put('agentKv:blob:a2', kept([{ tool_name: 'beta', annotations_json: '{"destructiveHint":true}' }]));
+  save('c', Date.now(), [user('one'), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  assert.strictEqual(betaOf(entries()[1]).annotations_json, '{"destructiveHint":true}');
+});
+
 test('the bundle of this Cursor, when it is installed, names the browser server inline', { skip: !fs.existsSync(path.join(APP, 'extensions', 'cursor-agent-exec', 'dist', 'main.js')) && 'needs Cursor\'s bundle' }, () => {
   const { source, servers } = sources.inlineMcpServers(APP);
   assert.strictEqual(source, 'bundle');

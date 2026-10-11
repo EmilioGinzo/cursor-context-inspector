@@ -717,6 +717,12 @@ function parseInlineServers(text) {
 // env.toolAnnotations: Map of `${serverIdentifier}\n${toolName}` -> annotations_json, as sent.
 const annotationKey = (server, tool) => `${server}\n${tool}`;
 
+// The annotationKey of every tool in an MCP part's meta-tool descriptors (the ones annotated, if known).
+function annotationKeysOf(mcps) {
+  return ((mcps.mcp_meta_tool_options && mcps.mcp_meta_tool_options.mcp_descriptors) || [])
+    .flatMap((d) => (d.tools || []).map((t) => annotationKey(d.server_identifier, t.tool_name)));
+}
+
 function mcpsPart(env, workspacePaths) {
   const dir = projectDir(env, workspacePaths);
   if (!dir) return { tools: [], mcp_instructions: [] };
@@ -909,4 +915,4 @@ function stripJsonComments(text) {
 // Installed plugins: [{ name, marketplace, rev }] (the keys of env.pluginIds are `${name}-${rev}`).
 const installedPlugins = (env) => plugins(env).map(({ name, marketplace, rev }) => ({ name, marketplace, rev }));
 
-module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey, inlineMcpServers, parseInlineServers, INLINE_MCP_SERVERS_FALLBACK };
+module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey, annotationKeysOf, mcpsPart, inlineMcpServers, parseInlineServers, INLINE_MCP_SERVERS_FALLBACK };

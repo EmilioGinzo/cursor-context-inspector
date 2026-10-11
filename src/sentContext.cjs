@@ -71,38 +71,52 @@ function pluginIds(db, dir, plugins, now) {
   return known;
 }
 
-// MCP tool annotations (readOnlyHint...) are not on disk. Cursor keeps them in the meta-tool parts it
-// stored in agentKv (the server asked for those bytes), so they are read from there: scanned at most
-// once an hour, remembered in context/tool-annotations.json. A tool seen with several values keeps
-// the most frequent one.
+// MCP tool annotations (readOnlyHint, title...) are not on disk. Cursor keeps them in the meta-tool
+// parts it stored in agentKv (the server asked for those bytes), so they are read from there, at most
+// once an hour, and remembered in context/tool-annotations.json. Servers change them (a title was
+// renamed in the captured runs): every distinct value is kept with its count and the row it was last
+// seen in, and the one stored last is used. Blob rows are written once, so each scan reads only the
+// rows after the last one it saw.
 const ANNOTATION_RESCAN_MS = 60 * 60 * 1000;
 
-// { annotations: Map of key -> annotations_json, conflicts: tools seen with more than one value }.
+// { annotations: Map of key -> annotations_json (the last stored), conflicts: tools with more than one value }.
+// File: { scannedAt, lastRowid, tools: { key: { annotations_json: { count, lastRowid } } } }.
 function toolAnnotations(db, dir, now) {
   const file = path.join(dir, 'context', 'tool-annotations.json');
-  let known = { scannedAt: 0, tools: {}, conflicts: 0 };
+  let known = { scannedAt: 0, lastRowid: 0, tools: {} };
   try {
-    known = JSON.parse(fs.readFileSync(file, 'utf8'));
+    known = { ...known, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
+    known.tools = mergeAnnotations(known.tools, {});
   } catch {
     /* none yet */
   }
   if (now - known.scannedAt >= ANNOTATION_RESCAN_MS) {
-    const found = scanAnnotations(db);
-    known = { scannedAt: now, tools: { ...known.tools, ...found.tools }, conflicts: found.conflicts };
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(known, null, 2));
+    const found = scanAnnotations(db, known.lastRowid);
+    known = { scannedAt: now, lastRowid: found.lastRowid, tools: mergeAnnotations(known.tools, found.tools) };
+    writeAtomic(file, JSON.stringify(known, null, 2));
   }
-  return { annotations: new Map(Object.entries(known.tools)), conflicts: known.conflicts };
+  const annotations = new Map();
+  let conflicts = 0;
+  for (const [key, values] of Object.entries(known.tools)) {
+    const entries = Object.entries(values);
+    annotations.set(key, entries.sort((a, b) => b[1].lastRowid - a[1].lastRowid)[0][0]);
+    if (entries.length > 1) conflicts++;
+  }
+  return { annotations, conflicts };
 }
 
-function scanAnnotations(db) {
+// Rows after `after` (up to the newest one now): { tools: { key: { json: { count, lastRowid } } }, lastRowid }.
+function scanAnnotations(db, after) {
+  let top = after;
   let rows = [];
   try {
-    rows = db.prepare("SELECT value FROM cursorDiskKV WHERE key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all();
+    top = db.prepare('SELECT max(rowid) AS top FROM cursorDiskKV').get().top ?? after;
+    if (top < after) return scanAnnotations(db, 0); // the table was rebuilt: read it all again
+    rows = db.prepare("SELECT rowid AS id, value FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? AND key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all(after, top);
   } catch {
-    return { tools: {}, conflicts: 0 };
+    return { tools: {}, lastRowid: after };
   }
-  const counts = new Map();
+  const tools = {};
   for (const r of rows) {
     const data = Buffer.from(r.value);
     if (!rc.looksLikePart('mcps', data)) continue;
@@ -110,15 +124,39 @@ function scanAnnotations(db) {
     for (const d of (options && options.mcp_descriptors) || []) {
       for (const t of d.tools || []) {
         if (typeof t.annotations_json !== 'string') continue;
-        const key = sources.annotationKey(d.server_identifier, t.tool_name);
-        const values = counts.get(key) || new Map();
-        values.set(t.annotations_json, (values.get(t.annotations_json) || 0) + 1);
-        counts.set(key, values);
+        const values = (tools[sources.annotationKey(d.server_identifier, t.tool_name)] ??= {});
+        const e = (values[t.annotations_json] ??= { count: 0, lastRowid: 0 });
+        e.count++;
+        e.lastRowid = Math.max(e.lastRowid, r.id);
       }
     }
   }
-  const tools = Object.fromEntries([...counts].map(([key, values]) => [key, [...values].sort((a, b) => b[1] - a[1])[0][0]]));
-  return { tools, conflicts: [...counts.values()].filter((values) => values.size > 1).length };
+  return { tools, lastRowid: top };
+}
+
+// Adds the counts of `found` to `known`, keeping every value either has (none is dropped).
+function mergeAnnotations(known, found) {
+  const out = {};
+  for (const [key, values] of Object.entries(known)) {
+    // Earlier files kept one string per tool: it counts once.
+    out[key] = typeof values === 'string' ? { [values]: { count: 1, lastRowid: 0 } } : { ...values };
+  }
+  for (const [key, values] of Object.entries(found)) {
+    out[key] = { ...(out[key] || {}) };
+    for (const [json, e] of Object.entries(values)) {
+      const old = out[key][json] || { count: 0, lastRowid: 0 };
+      out[key][json] = { count: old.count + e.count, lastRowid: Math.max(old.lastRowid, e.lastRowid) };
+    }
+  }
+  return out;
+}
+
+// Written beside the old file, then renamed over it: a crash leaves the last complete file.
+function writeAtomic(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
 }
 
 function findPluginIds(db, plugin, key) {

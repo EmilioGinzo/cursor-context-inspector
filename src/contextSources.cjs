@@ -809,7 +809,7 @@ function buildParts(workspacePaths, options = {}) {
   }
   if (plugins(env).some((p) => p.id === undefined || p.marketplaceId === undefined)) notes.push('plugin database ids unknown: plugin skills and MCP servers may differ from what Cursor sent');
   if (!env.toolAnnotations) notes.push('MCP tool annotations not read (no Cursor database): MCP tools may differ from what Cursor sent');
-  else if (env.annotationConflicts) notes.push(`${env.annotationConflicts} MCP tools had different annotations in the parts Cursor kept (the servers changed them): the most frequent was taken, which may not be the one sent`);
+  else if (env.annotationConflicts) notes.push(`${env.annotationConflicts} MCP tools had different annotations in the parts Cursor kept (the servers changed them): the last one stored was taken, which may not be the one sent; all are in context/tool-annotations.json`);
   return { parts, dynamic, notes };
 }
 

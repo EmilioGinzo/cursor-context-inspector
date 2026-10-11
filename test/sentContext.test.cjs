@@ -283,12 +283,13 @@ test('MCP tools: built-in servers in full, the others by name with their annotat
   assert.ok(rc.encodeParts(parts).mcps.data.includes(Buffer.from('{"readOnlyHint":true,"destructiveHint":false}')));
 });
 
-test('tool annotations are read from a meta-tool part Cursor kept, most frequent value first', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+test('tool annotations are read from the meta-tool parts Cursor kept: the last stored value is used, none is dropped', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
   const root = tmp(t);
   const { home, ws } = sourcesFixture(root);
   const { db, put, save } = chatDb(ws);
   const kept = (value) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools: [{ tool_name: 'alpha', annotations_json: value }, { tool_name: 'zeta' }] }] } });
-  // Two parts say readOnlyHint, one says the opposite: the majority is kept.
+  // Two older parts say readOnlyHint, then the server changed it: the newest part says the opposite.
+  // The newest value is used (the most frequent one is the old one); the old one stays in the cache.
   put('agentKv:blob:a1', kept('{"readOnlyHint":true}'));
   put('agentKv:blob:a2', kept('{"readOnlyHint":true}'));
   put('agentKv:blob:a3', kept('{"readOnlyHint":false}'));
@@ -297,9 +298,25 @@ test('tool annotations are read from a meta-tool part Cursor kept, most frequent
   history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home } });
   const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
   const meta = rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors;
-  assert.deepStrictEqual(meta.find((d) => d.server_identifier === 'srv').tools.map((x) => [x.tool_name, x.annotations_json]).sort(), [['alpha', '{"readOnlyHint":true}'], ['zeta', undefined]]);
+  assert.deepStrictEqual(meta.find((d) => d.server_identifier === 'srv').tools.map((x) => [x.tool_name, x.annotations_json]).sort(), [['alpha', '{"readOnlyHint":false}'], ['zeta', undefined]]);
+  assert.ok(entry.notes.some((n) => /1 MCP tools had different annotations/.test(n)));
   const known = JSON.parse(fs.readFileSync(path.join(dir, 'context', 'tool-annotations.json'), 'utf8'));
-  assert.deepStrictEqual(known.tools, { [sources.annotationKey('srv', 'alpha')]: '{"readOnlyHint":true}' });
+  const values = known.tools[sources.annotationKey('srv', 'alpha')];
+  assert.deepStrictEqual(Object.entries(values).map(([v, e]) => [v, e.count]).sort(), [['{"readOnlyHint":false}', 1], ['{"readOnlyHint":true}', 2]]);
+  assert.ok(known.lastRowid > 0);
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'context')).filter((f) => f.endsWith('.tmp')), []);
+});
+
+test('an annotation file from before (one string per tool) keeps its value', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  save('c', Date.now(), [{ role: 'user', content: 'plain question' }]);
+  const dir = path.join(root, 'history');
+  write(path.join(dir, 'context', 'tool-annotations.json'), JSON.stringify({ scannedAt: 0, tools: { [sources.annotationKey('srv', 'alpha')]: '{"readOnlyHint":true}' }, conflicts: 0 }));
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home } });
+  const known = JSON.parse(fs.readFileSync(path.join(dir, 'context', 'tool-annotations.json'), 'utf8'));
+  assert.deepStrictEqual(known.tools[sources.annotationKey('srv', 'alpha')], { '{"readOnlyHint":true}': { count: 1, lastRowid: 0 } });
 });
 
 test('plugin database ids are taken from a part Cursor kept', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {

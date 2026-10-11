@@ -243,8 +243,8 @@ browser and dev-control servers in full, and every other server's tools by name
 with their annotations (`readOnlyHint` and the like), plus each server's
 folder and tool files. Annotations are not in the snapshots; they are read from
 the copies Cursor kept of this part in its database (`context/tool-annotations.json`,
-rescanned hourly). A tool with several annotations there takes the most
-frequent, and a note says so.
+rescanned hourly). Servers change them, so a tool can have several values there: the one
+stored last is used, a note says so, and every value is kept in that file.
 
 A rebuilt part is what Cursor sent only when their sha256 match.
 `cursor-context wire compare` checks that against captured traffic, part by

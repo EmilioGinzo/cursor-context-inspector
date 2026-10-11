@@ -14,9 +14,11 @@
 // sent" when its sha256 is one Cursor used; `storedByCursor` lists parts Cursor itself kept in agentKv under that id.
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const rc = require('./requestContext.cjs');
 const sources = require('./contextSources.cjs');
+const mcpConnections = require('./mcpConnections.cjs');
 const { redactValue } = require('./redact.cjs');
 
 // A message is matched with a rebuild made at most this long after it: later, the sources (rule
@@ -174,13 +176,15 @@ function findPluginIds(db, plugin, key) {
   return {};
 }
 
-// Rebuilds the parts for these workspace folders, at most once per `cache` (one recorder tick).
-function rebuild(folders, options, cache, db, dir) {
-  const key = JSON.stringify(folders);
+// Rebuilds the parts for these workspace folders as they were at `at` (the message's time: which
+// MCP servers were connected then), at most once per `cache` (one recorder tick).
+function rebuild(folders, options, cache, db, dir, at) {
+  const key = JSON.stringify([folders, at]);
   if (cache && cache.has(key)) return cache.get(key);
   let result;
   try {
-    const env = sources.environment(options);
+    const logs = options.cursorLogsDir || path.join(options.home || os.homedir(), '.config', 'Cursor', 'logs');
+    const env = sources.environment({ ...options, connections: mcpConnections.connectionsAt(logs, at) });
     if (db) env.pluginIds = pluginIds(db, dir, sources.installedPlugins(env), Date.now());
     if (db) {
       const annotations = toolAnnotations(db, dir, Date.now());
@@ -206,7 +210,7 @@ function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db
   const messages = newUserMessages(hashes, seenBefore, readMessage, userBlocks);
   if (!messages.length) return undefined;
   const folders = sources.workspaceFolders(composer.workspaceIdentifier);
-  const built = rebuild(folders, options, options.cache, db, dir);
+  const built = rebuild(folders, options, options.cache, db, dir, composer.lastUpdatedAt);
   const entry = { messages, messageAt: composer.lastUpdatedAt, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
   if (built.error) return { ...entry, error: redactValue(built.error).value };
   entry.parts = {};

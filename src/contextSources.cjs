@@ -28,6 +28,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const mcpConnections = require('./mcpConnections.cjs');
 const cp = require('node:child_process');
 
 const DEFAULT_APP_DIR = '/usr/share/cursor/resources/app';
@@ -747,6 +748,15 @@ function mcpsPart(env, workspacePaths) {
     const plugin = /^plugin-/.test(n) ? pluginList.find((p) => n.startsWith(`plugin-${p.name}-`)) : undefined;
     return { folder, folderId: n, id: meta.serverIdentifier || n, name: meta.serverName || n, instructions, tools, plugin };
   });
+  // A server Cursor had not connected when the message was sent is still listed, with no tools and no
+  // instructions (mcpConnections.cjs: from Cursor's logs at the time).
+  const offline = folders.filter((s) => !mcpConnections.isConnected(env.connections, s.id));
+  for (const s of offline) {
+    s.tools = [];
+    s.instructions = undefined;
+  }
+  if (offline.length) env.notes.push(`MCP servers not connected when the message was sent, per Cursor's logs (sent with no tools or instructions): ${offline.map((s) => s.name).join(', ')}`);
+  else if (!env.connections && folders.length) env.notes.push('Cursor\'s MCP logs not read: every MCP server is taken as connected');
   // The order of the meta-tool descriptors and instructions is the order servers connected in, not on
   // disk: Cursor's own servers first, by name, then plugins (the one order seen in the wire matches).
   const servers = [...folders].sort((a, b) => (!!a.plugin - !!b.plugin) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -805,8 +815,9 @@ function dynamicContext(env, workspacePaths) {
 // --- entry point ---------------------------------------------------------------------------
 
 // The environment the rebuild reads: Cursor's app (for ripgrep and gray-matter), the home folder.
-function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations } = {}) {
-  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, notes: [] };
+// connections: { server id: connected } when the message was sent (mcpConnections.connectionsAt), if known.
+function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations, connections } = {}) {
+  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, connections, notes: [] };
   const inline = inlineMcpServers(appDir);
   env.inlineServers = inline.servers;
   if (inline.source === 'fallback') env.notes.push('Cursor\'s bundle not read: the MCP servers sent inline are the built-in list');

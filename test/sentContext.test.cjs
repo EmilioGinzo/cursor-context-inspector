@@ -14,6 +14,7 @@ const { DatabaseSync } = require('node:sqlite');
 const rc = require('../src/requestContext.cjs');
 const sources = require('../src/contextSources.cjs');
 const history = require('../src/history.cjs');
+const mcpConnections = require('../src/mcpConnections.cjs');
 
 const APP = sources.DEFAULT_APP_DIR;
 const haveCursor = fs.existsSync(path.join(APP, 'node_modules', 'gray-matter'));
@@ -445,4 +446,56 @@ test('the bundle of this Cursor, when it is installed, names the browser server 
   const { source, servers } = sources.inlineMcpServers(APP);
   assert.strictEqual(source, 'bundle');
   assert.ok(servers.has('cursor-ide-browser'));
+});
+
+// Cursor's log time (local, as the machine's clock) for a Date's epoch ms, and a launch folder's name.
+const logTime = (ms) => {
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+};
+const launchName = (ms) => logTime(ms).replace(/[-: ]/g, '').replace(/\.\d+$/, '').replace(/(\d{8})(\d{6})/, '$1T$2');
+
+test('a server is connected at a time when the last connection evidence before it says so', (t) => {
+  const logs = path.join(tmp(t), 'logs');
+  const at = new Date(2026, 9, 10, 14, 30, 38).getTime();
+  const launch = path.join(logs, '20261010T142947');
+  write(path.join(launch, 'mcp-server-srv.log'), `${logTime(at - 47e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  write(path.join(launch, 'window1', 'workbench.mcp.files.log'), [
+    `${logTime(at - 40e3)} [info] [MCPService] createClient completed for server: ide, connected=true, statusType=connected`,
+    `${logTime(at - 30e3)} [info] [MCPService] createClient completed for server: srv, connected=true, statusType=connected`,
+    `${logTime(at - 20e3)} [info] [MCPService] createClient completed for server: ide, connected=false, statusType=error, error=fetch failed`,
+    `${logTime(at + 60e3)} [info] [MCPService] createClient completed for server: srv, connected=false, statusType=error, error=later`,
+  ].join('\n') + '\n');
+  // A launch that began after the time is not read; the logs of an earlier one are.
+  write(path.join(logs, '20261010T143441', 'window1', 'workbench.mcp.files.log'), `${logTime(at + 10e3)} [info] createClient completed for server: ide, connected=true, statusType=connected\n`);
+  write(path.join(logs, '20261010T100000', 'mcp-server-old.log'), `${logTime(at - 3600e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  const connections = mcpConnections.connectionsAt(logs, at);
+  assert.deepStrictEqual([...connections].sort(), [['ide', false], ['old', false], ['srv', true]]);
+  assert.strictEqual(mcpConnections.isConnected(connections, 'never-seen'), true);
+  assert.strictEqual(mcpConnections.isConnected(connections, 'ide'), false);
+  assert.strictEqual(mcpConnections.connectionsAt(path.join(logs, 'missing'), at), undefined);
+  assert.strictEqual(mcpConnections.isConnected(undefined, 'anything'), true);
+  // Before any evidence, nothing is known about the server: taken as connected.
+  assert.strictEqual(mcpConnections.connectionsAt(logs, at - 5 * 3600e3), undefined);
+  assert.strictEqual(launchName(at), '20261010T143038');
+});
+
+test('a server Cursor had not connected is sent with no tools and no instructions, and the note says so', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const now = Date.now();
+  const logs = path.join(root, 'logs');
+  // The fixture's server (srv) failed to connect a minute before the message; its Transient error is in its own log.
+  write(path.join(logs, launchName(now - 3600e3), 'mcp-server-srv.log'), `${logTime(now - 3600e3 - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  save('c', now - 3600e3, [{ role: 'user', content: '<user_query>\nhi\n</user_query>' }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now, cursorLogsDir: logs, maxAgeMs: Infinity } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const meta = rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors;
+  // (An empty list is not encoded: the descriptor is there, with no tool.)
+  assert.strictEqual((meta.find((d) => d.server_identifier === 'srv').tools || []).length, 0);
+  assert.strictEqual(meta.find((d) => d.server_identifier === 'srv').server_use_instructions, undefined);
+  assert.ok(entry.notes.some((n) => /not connected when the message was sent.*Server/.test(n)));
 });

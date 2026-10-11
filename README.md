@@ -278,10 +278,14 @@ stored last is used, a note says so, and every value is kept in that file.
 
 A rebuilt part is what Cursor sent only when their sha256 match.
 `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
-under the same id. Things the rebuild cannot know: the order MCP servers
-connected in (Cursor's own servers are put first in the tool descriptors), which
-servers were connected when the message was sent (a server that was not is
-listed without its tools), team rules,
+under the same id. Which MCP servers were connected when the message was sent is
+read from Cursor's logs (`~/.config/Cursor/logs`: a server's failed connection
+attempts, and the outcome of each attempt, before the message's time). A server
+that was not connected is listed without its tools or instructions, as the
+captured requests show, and the note says which; a server the logs say nothing
+about is taken as connected. Things the rebuild cannot know: the order MCP
+servers connected in (Cursor's own servers are put first in the tool descriptors),
+team rules,
 Agent Store skills, and plugin database ids, which are taken from a part Cursor
 kept in its database when there is one (`context/plugin-ids.json`). Nor the order of a rule
 edited while Cursor runs (Cursor moves it to the end of its list), or files

@@ -14,10 +14,12 @@
 //   meta.json                      name, model, workspace, message hashes in first-seen order,
 //                                  context sent with each user message (sentContext)
 //   snapshots/<changedAt>.json     token breakdown + the root message hashes at that moment
-//   snapshots/<lastUpdatedAt>-<n>.json  the first n of them: a model call's prompt, or a turn's end, before that update
+//   snapshots/<lastUpdatedAt>-<n>.json  the first n of them: a model call's prompt, or a turn's end, before that update;
+//                                  with "replaced": i, the prompt of the call after a tool result Cursor replaced, its earlier result at i
 //   latest.json                    newest snapshot plus Cursor's usage tree
 //   chat.md                        the conversation, readable: user, agent, thinking, tool calls
-//   thinking.json                  the agent's readable thinking from Cursor's turn steps, placed on prompt messages
+//   thinking.json                  the agent's readable thinking from Cursor's turn steps, placed on prompt messages;
+//                                  thinking only a bubble kept, unplaced (source 'bubble')
 //   transcript.md                  every message ever seen, raw text, in order; links subagents
 //   subagents/<subagent name>/     a <chat> for each subagent it spawned (nested to any depth)
 //
@@ -205,18 +207,47 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const chatDir = chatDirFor(db, dir, composerId, composer.name || 'Untitled chat');
   const breakdown = composer.promptTokenBreakdown || {};
   const totalUsedTokens = breakdown.totalUsedTokens ?? composer.contextTokensUsed;
+  const metaFile = path.join(chatDir, 'meta.json');
+  const previous = readJson(metaFile, {});
+  // Messages Cursor kept that are no longer in the prompt. Two kinds: the ones summarization archived
+  // (the state's summary archive names them), and the earlier version of a result that was replaced in
+  // the prompt, which nothing in the state names: only a read of the whole store finds it, by its call
+  // id. That read is costly, so it runs once per set of calls, and not while a run writes the chat.
+  const archived = turnSteps.archivedHashes(db, composer.conversationState);
+  const turns = turnSteps.loadTurns(db, composer.conversationState);
+  const scanned = new Set(previous.scannedCalls || []);
+  const unscanned = [...new Set(turns.flatMap((t) => t.steps).map(turnSteps.callIdOf).filter(Boolean))].filter((id) => !scanned.has(id));
+  const scanNow = unscanned.length > 0 && options.scanCalls !== false && !(composer.generatingBubbleIds || []).length;
+  const found = new Map();
+  if (scanNow) {
+    // Between the rows of the chat's own blobs (Cursor stores a run's messages as it goes).
+    const own = [...hashes, ...archived, ...turns.flatMap((t) => [t.turn, ...t.steps.map((s) => s.hash)])]
+      .map((h) => store.rowidOf(db, `agentKv:blob:${h}`)).filter((r) => r !== undefined);
+    const ids = new Set(unscanned);
+    for (const { hash, value } of own.length ? store.blobsNaming(db, unscanned, Math.min(...own), Math.max(...own)) : []) {
+      let message;
+      try { message = JSON.parse(value.toString('utf8')); } catch { continue; }
+      if (message && Array.isArray(message.content) && message.content.some((p) => p && ids.has(p.toolCallId))) found.set(hash, value);
+    }
+  }
   // Before the check below: Cursor may write a message after the prompt that lists it.
   const fetched = new Set();
-  for (const hash of hashes) {
+  for (const hash of new Set([...hashes, ...archived, ...found.keys()])) {
     const blobFile = path.join(dir, 'blobs', `${hash}.json`);
     if (fs.existsSync(blobFile)) continue;
-    const value = store.getValue(db, `agentKv:blob:${hash}`);
+    const value = found.has(hash) ? found.get(hash) : store.getValue(db, `agentKv:blob:${hash}`);
     if (value === undefined) continue;
     writeAtomic(blobFile, value);
     fetched.add(hash);
   }
-  const metaFile = path.join(chatDir, 'meta.json');
-  const previous = readJson(metaFile, {});
+  // The messages that left the prompt, once their blobs are here: they join the record before the prompt's.
+  const inPrompt = new Set(hashes);
+  const earlier = [...new Set([...archived, ...found.keys()])]
+    .filter((h) => !inPrompt.has(h) && fs.existsSync(path.join(dir, 'blobs', `${h}.json`)));
+  const remember = (meta) => {
+    const seen = new Set(meta.seen);
+    for (const h of [...earlier, ...hashes]) if (!seen.has(h)) { meta.seen.push(h); seen.add(h); }
+  };
   // A subagent's messages carry the same context parts as the root's (the wire shows the same
   // blob ids). A message seen before its blob was written is new when the blob arrives.
   const sent = sentContext.record({
@@ -230,13 +261,23 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (latest && latest.lastUpdatedAt === composer.lastUpdatedAt && latest.totalUsedTokens === totalUsedTokens
     && (latest.messages || []).join() === hashes.join()) {
     const meta = previous;
-    if (sent && meta.seen) meta.sentContext = [...(meta.sentContext || []), sent];
-    const relinked = addToolCallId(meta, composer);
-    if (meta.seen && (sent || relinked)) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
-    // The late message may be the one a thinking belongs to.
-    if (fetched.size && meta.seen) {
-      recordThinking(db, dir, chatDir, meta, composer.conversationState);
-      writeTranscript(db, dir, chatDir, meta, hashes);
+    if (meta.seen) {
+      const seenBefore = meta.seen.length;
+      remember(meta);
+      if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+      if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
+      if (scanNow || meta.seen.length !== seenBefore) {
+        const states = recordReplaced(dir, chatDir, composerId, composer, hashes, meta.seen, new Set(archived), options.clock || Date.now);
+        if (states) meta.snapshots = (meta.snapshots || 0) + states;
+      }
+      const relinked = addToolCallId(meta, composer);
+      const changed = meta.seen.length !== seenBefore;
+      if (sent || scanNow || changed || relinked) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+      // The late message may be the one a thinking belongs to.
+      if (fetched.size || changed) {
+        recordThinking(db, dir, chatDir, meta, turns, composerId);
+        writeTranscript(db, dir, chatDir, meta, hashes);
+      }
     }
     return recorded;
   }
@@ -252,6 +293,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
       composerId, recordedAt: clock(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
     });
   }
+  written += recordReplaced(dir, chatDir, composerId, composer, hashes, [...new Set([...(previous.seen || []), ...earlier])], new Set(archived), clock);
   const snapshot = {
     composerId,
     recordedAt: clock(),
@@ -268,8 +310,8 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...previous };
-  const seen = new Set(meta.seen);
-  for (const h of hashes) if (!seen.has(h)) meta.seen.push(h);
+  remember(meta);
+  if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
   Object.assign(meta, {
     name: composer.name || 'Untitled chat',
     model: snapshot.model,
@@ -287,7 +329,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
   addToolCallId(meta, composer);
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
-  recordThinking(db, dir, chatDir, meta, composer.conversationState);
+  recordThinking(db, dir, chatDir, meta, turns, composerId);
   writeTranscript(db, dir, chatDir, meta, hashes);
   return recorded + 1;
 }
@@ -315,6 +357,47 @@ function addToolCallId(meta, composer) {
   return true;
 }
 
+// A tool result Cursor replaced in the prompt: the prompt of the model call that followed it still held
+// the earlier version (the one the record kept, found by its call id). Returns, for each such version,
+// { before, index, messages }: the prompt before the first assistant message after the result, with the
+// earlier version at the result's index. `seen`: the chat's messages in the record; `archived`: the ones summarization
+// took out (a summary, not a replacement).
+function replacedStates(dir, hashes, seen, archived) {
+  const read = (h) => readJson(path.join(dir, 'blobs', `${h}.json`), undefined);
+  const callIds = (m) => (m && Array.isArray(m.content) ? m.content.filter((p) => p && typeof p.toolCallId === 'string').map((p) => p.toolCallId) : []);
+  const inPrompt = new Set(hashes);
+  // An archived message was in an earlier prompt, not a replaced result of this one.
+  const outside = seen.filter((h) => !inPrompt.has(h) && !archived.has(h));
+  if (!outside.length) return [];
+  const resultAt = new Map(); // call id -> index of the prompt's tool result
+  const messages = hashes.map((h) => read(h));
+  messages.forEach((m, i) => { if (m && m.role === 'tool') for (const id of callIds(m)) resultAt.set(id, i); });
+  const out = [];
+  for (const h of outside) {
+    const m = read(h);
+    if (!m || m.role !== 'tool') continue;
+    const id = callIds(m).find((x) => resultAt.has(x));
+    if (id === undefined) continue;
+    const index = resultAt.get(id);
+    const before = messages.findIndex((x, k) => k > index && x && x.role === 'assistant');
+    if (before === -1) continue;
+    out.push({ before, index, messages: hashes.slice(0, before).map((x, k) => (k === index ? h : x)) });
+  }
+  return out;
+}
+
+// Writes the snapshots of replacedStates. Returns how many were new.
+function recordReplaced(dir, chatDir, composerId, composer, hashes, seen, archived, clock) {
+  const model = composer.modelConfig && composer.modelConfig.modelName;
+  let written = 0;
+  for (const r of replacedStates(dir, hashes, seen, archived)) {
+    written += writeSnapshot(chatDir, `${composer.lastUpdatedAt}-${r.before}`, {
+      composerId, recordedAt: clock(), lastUpdatedAt: composer.lastUpdatedAt, model, state: 'prompt', before: r.before, messages: r.messages, replaced: r.index,
+    });
+  }
+  return written;
+}
+
 // Cursor keeps only the chat's newest state, but the states it went through are prefixes of it:
 // each assistant message was written by a model call that saw exactly the messages before it,
 // and a turn ended before each user message that follows the agent. Returns, for the states
@@ -338,11 +421,14 @@ function earlierStates(dir, hashes, summaries, previous) {
 
 // The prompt holds the model's thinking only encrypted; Cursor keeps the readable text as turn
 // steps (see turnSteps.cjs). Each entry: { step, turn, text, durationMs, message, part }. Thinking
-// of turns Cursor no longer lists stays as recorded.
-function recordThinking(db, dir, chatDir, meta, conversationState) {
+// of turns Cursor no longer lists stays as recorded. Thinking Cursor showed on a bubble but kept
+// in no turn step is recorded unplaced (source 'bubble'): its message is not known.
+function recordThinking(db, dir, chatDir, meta, turns, composerId) {
   const file = path.join(chatDir, 'thinking.json');
   const messages = meta.seen.map((hash) => ({ hash, message: readJson(path.join(dir, 'blobs', `${hash}.json`), undefined) }));
-  const current = turnSteps.placeThinking(turnSteps.loadTurns(db, conversationState), messages);
+  const bubbles = turnSteps.bubbleThinking(db, composerId, turns)
+    .map(({ bubble, text }) => ({ step: `bubble:${bubble}`, turn: null, text, message: null, part: null, source: 'bubble' }));
+  const current = [...turnSteps.placeThinking(turns, messages), ...bubbles];
   const fresh = new Map(current.map((e) => [e.step, e]));
   const kept = readJson(file, []).map((e) => fresh.get(e.step) || e);
   const known = new Set(kept.map((e) => e.step));
@@ -436,7 +522,7 @@ function rebuildTranscripts(db, dir) {
       }
       writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       for (const id of meta.subagentIds || []) recordChat(db, id, dir);
-      if (row) recordThinking(db, dir, chatDir, meta, composer.conversationState);
+      if (row) recordThinking(db, dir, chatDir, meta, turnSteps.loadTurns(db, composer.conversationState), meta.composerId);
       const latest = readJson(path.join(chatDir, 'latest.json'), { messages: meta.seen });
       writeTranscript(db, dir, chatDir, meta, latest.messages);
     }
@@ -511,7 +597,8 @@ function migrateLayout(db, dir) {
     const noThinking = meta.seen && !fs.existsSync(path.join(target, 'thinking.json'));
     if (noThinking) {
       const row = store.getValue(db, `composerData:${id}`);
-      recordThinking(db, dir, target, meta, row ? JSON.parse(row).conversationState : undefined);
+      const state = row ? JSON.parse(row).conversationState : undefined;
+      recordThinking(db, dir, target, meta, turnSteps.loadTurns(db, state), id);
     }
     if (meta.seen && (noThinking || !fs.existsSync(path.join(target, 'chat.md')))) {
       writeTranscript(db, dir, target, meta, readJson(path.join(target, 'latest.json'), { messages: meta.seen }).messages);

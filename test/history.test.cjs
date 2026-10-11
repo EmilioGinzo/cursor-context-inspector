@@ -14,23 +14,28 @@ function setup() {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
   const put = (k, v) => db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(k, v);
+  // A blob keeps the row it was first stored at, as Cursor's store does: rowid order is storage order.
+  const putOnce = (k, v) => db.prepare('INSERT OR IGNORE INTO cursorDiskKV VALUES (?, ?)').run(k, v);
   const blob = (m) => {
     const raw = Buffer.from(JSON.stringify(m));
     const hash = crypto.createHash('sha256').update(raw).digest();
-    put(`agentKv:blob:${hash.toString('hex')}`, raw);
+    putOnce(`agentKv:blob:${hash.toString('hex')}`, raw);
     return hash;
   };
   const raw = (data) => {
     const hash = crypto.createHash('sha256').update(data).digest();
-    put(`agentKv:blob:${hash.toString('hex')}`, data);
+    putOnce(`agentKv:blob:${hash.toString('hex')}`, data);
     return hash;
   };
   // turns: each a list of ConversationStep bytes (see step below), stored as Cursor does.
-  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0, turns = [], ...extra } = {}) => {
+  // archive: messages summarization took out of the prompt; the state's summary archive (field 13)
+  // is a blob listing their blob ids.
+  const save = (lastUpdatedAt, messages, { id = 'chat-1', name = 'History chat', summaries = 0, turns = [], archive = [], ...extra } = {}) => {
     // self_summary_count is field 17, varint: tag 0x88 0x01.
     const count = summaries ? [Buffer.from([0x88, 0x01, summaries])] : [];
+    const archived = archive.length ? [pb.len(13, raw(Buffer.concat(archive.map((m) => pb.len(1, blob(m))))))] : [];
     const turnIds = turns.map((steps) => raw(pb.len(1, Buffer.concat(steps.map((st) => pb.len(2, raw(st)))))));
-    const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count, ...turnIds.map((t) => pb.len(8, t))]);
+    const state = Buffer.concat([...messages.flatMap((m) => [Buffer.from([0x0a, 0x20]), blob(m)]), ...count, ...archived, ...turnIds.map((t) => pb.len(8, t))]);
     put(`composerData:${id}`, JSON.stringify({
       name, lastUpdatedAt, conversationState: `~${state.toString('base64')}`,
       promptTokenBreakdown: { totalUsedTokens: 10, maxTokens: 100, categories: [] }, ...extra,
@@ -611,3 +616,105 @@ test('thinking whose message Cursor writes after the chat is recorded is placed 
   assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /sent to the model encrypted, 3 bytes\)<\/i><\/summary>\n\nThought late\./);
 });
 
+
+const hashOf = (m) => crypto.createHash('sha256').update(JSON.stringify(m)).digest('hex');
+// A tool-call step: the call's id is field 57 of the call (the id its tool-call and tool-result parts share).
+const callStep = (id) => pb.len(2, pb.len(57, id));
+
+test('messages summarization archived are recorded, though no tick saw them in the prompt', () => {
+  const { db, save, dir } = setup();
+  // The first exchange was summarized away before the recorder ever saw it.
+  save(1000, [sys, summary], { archive: [first, answer] });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  for (const m of [first, answer]) assert.ok(fs.existsSync(path.join(dir, 'blobs', `${hashOf(m)}.json`)));
+  assert.deepStrictEqual(meta.seen, [hashOf(first), hashOf(answer), hashOf(sys), hashOf(summary)], 'before the prompt, in archive order');
+  assert.match(fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8'), /## #0 user \(no longer in prompt\)\n\nfirst question/);
+});
+
+test('a tool result replaced in the prompt is recorded from the store, found by its call id', () => {
+  const { db, save, dir } = setup();
+  const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_1', args: {} }] };
+  const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_1', result: 'the old read' }] };
+  const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_1', result: 'the new read' }] };
+  const turns = [[callStep('tool_read_1')]];
+  // Cursor stored the call, then the old result, then replaced the result in the prompt by the new one.
+  save(1000, [sys, first, call], { turns });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+  save(2000, [sys, first, call, newResult], { turns });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  assert.ok(fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.ok(meta.seen.includes(hashOf(oldResult)));
+  assert.deepStrictEqual(meta.scannedCalls, ['tool_read_1']);
+  assert.match(fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8'), /the old read/);
+});
+
+test('the store is searched for replaced results only once a run has ended, and once per call', () => {
+  const store = require('../src/cursorStore.cjs');
+  const realScan = store.blobsNaming;
+  let scans = 0;
+  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
+  try {
+    const { db, save, dir } = setup();
+    const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_2', args: {} }] };
+    const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'first read' }] };
+    const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_2', result: 'second read' }] };
+    const turns = [[callStep('tool_read_2')]];
+    const running = { turns, generatingBubbleIds: ['bubble-running'] };
+    save(1000, [sys, first, call], running);
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+    save(1500, [sys, first, call, newResult], running);
+    // A run is writing the chat: its results may still change, so the store is not searched yet.
+    history.recordUpdatedSince(db, dir, 0);
+    assert.strictEqual(scans, 0);
+    assert.ok(!fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
+    // The run ends: searched once, and not again for the same call.
+    save(2000, [sys, first, call, newResult], { turns });
+    history.recordUpdatedSince(db, dir, 1000);
+    assert.ok(fs.existsSync(path.join(dir, 'blobs', `${hashOf(oldResult)}.json`)));
+    save(3000, [sys, first, call, newResult], { turns });
+    history.recordUpdatedSince(db, dir, 2000);
+    assert.strictEqual(scans, 1);
+  } finally {
+    store.blobsNaming = realScan;
+  }
+});
+test('thinking Cursor showed on a bubble, and no turn step kept, is recorded with its place not known', () => {
+  const { db, save, dir } = setup();
+  const reply = { role: 'assistant', content: [{ type: 'text', text: 'Hi.' }] };
+  save(1000, [sys, first, reply], { turns: [[step.thinking('Kept thought.'), step.text('Hi.')]] });
+  const bubble = (id, thinking) => db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)')
+    .run(`bubbleId:chat-1:${id}`, JSON.stringify({ type: 2, text: '', thinking: { text: thinking, signature: 'sig' } }));
+  bubble('bubble-1', 'Shown only on the bubble.');
+  bubble('bubble-2', 'Kept thought.'); // the same thought as the turn step: not recorded twice
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const thinking = JSON.parse(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'));
+  assert.deepStrictEqual(thinking.filter((e) => e.source === 'bubble').map((e) => [e.step, e.text, e.message]),
+    [['bubble:bubble-1', 'Shown only on the bubble.', null]]);
+  assert.strictEqual(thinking.length, 2);
+  assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /<summary>Thinking <i>\(its place in the chat is not known\)<\/i><\/summary>\n\nShown only on the bubble\./);
+});
+
+test('the prompt of the model call after a replaced tool result is recorded with the earlier result', () => {
+  const { db, save, dir } = setup();
+  const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_3', args: {} }] };
+  const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_3', result: 'the old read' }] };
+  const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_3', result: 'the new read' }] };
+  const reply = { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] };
+  const turns = [[callStep('tool_read_3')]];
+  save(1000, [sys, first, call], { turns });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+  save(2000, [sys, first, call, newResult, reply], { turns });
+  history.recordUpdatedSince(db, dir, 0);
+  const snapshots = path.join(dir, 'chats', 'History chat', 'snapshots');
+  const replaced = fs.readdirSync(snapshots).map((f) => JSON.parse(fs.readFileSync(path.join(snapshots, f), 'utf8'))).filter((s) => s.replaced !== undefined);
+  assert.strictEqual(replaced.length, 1);
+  // The model call that followed the result (before the reply) still had the earlier result at its index.
+  assert.strictEqual(replaced[0].replaced, 3);
+  assert.strictEqual(replaced[0].before, 4);
+  assert.deepStrictEqual(replaced[0].messages, [hashOf(sys), hashOf(first), hashOf(call), hashOf(oldResult)]);
+});

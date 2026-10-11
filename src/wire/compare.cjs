@@ -316,7 +316,8 @@ function checkAgentStream(run, addedMsgs, add, rec) {
   const texts = assistant.filter((a) => a.p.type === 'text').map((a) => a.p.text || '');
   // Thinking the prompt keeps only encrypted is recorded from Cursor's turn steps, on its message.
   const addedIds = new Set(addedMsgs.map((x) => x.id));
-  const placed = (rec.thinking || []).filter((t) => addedIds.has(t.message)).map((t) => t.text);
+  // Thinking shown on a bubble, with no message to place it on, is recorded unplaced (source 'bubble').
+  const placed = (rec.thinking || []).filter((t) => addedIds.has(t.message) || t.source === 'bubble').map((t) => t.text);
   const thoughts = [...assistant.filter((a) => a.p.type === 'reasoning' || a.p.type === 'redacted-reasoning').map((a) => a.p.text || ''), ...placed];
   // Cursor also stores each step (thinking, agent text, tool call with result) as a ConversationStep
   // blob under the conversation's turns; the plugin records the thinking from them (thinking.json).

@@ -125,7 +125,10 @@ function chatMarkdown(meta, messages, { subagents = [], parent, thinking = [], s
         }
       });
     }
-    for (const t of loose.filter((x) => x.unplaced)) say(agent, details(`Thinking${seconds(t.durationMs)} <i>(its message is not in the record)</i>`, t.text.trim()));
+    for (const t of loose.filter((x) => x.unplaced)) {
+      const why = t.source === 'bubble' ? 'its place in the chat is not known' : 'its message is not in the record';
+      say(agent, details(`Thinking${seconds(t.durationMs)} <i>(${why})</i>`, t.text.trim()));
+    }
   });
   return `${out.join('\n').trimEnd()}\n`;
 }

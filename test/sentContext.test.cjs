@@ -217,6 +217,28 @@ test('a subagent chat keeps the context sent with its messages, the same parts a
   assert.ok(fs.existsSync(path.join(dir, 'context', `${sub.sentContext[0].parts.rules.id}.bin`)));
 });
 
+test('a subagent with no workspace of its own is rebuilt from its parent\'s folders, as it ran there', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const dir = path.join(root, 'history');
+  const { db, save } = chatDb(ws);
+  const sys = { role: 'system', content: 'You are an agent.' };
+  const brief = { role: 'user', content: '<user_query>\nreview the cases\n</user_query>' };
+  const now = Date.now();
+  const options = { sentContext: { enabled: true, appDir: APP, home, now } };
+
+  save('parent', now - 2000, [sys, { role: 'user', content: '<user_query>\nstart\n</user_query>' }], { subagentComposerIds: ['sub'] });
+  // Cursor stores no workspace for some subagents (10 of 1,092 in one install); the parent's is the one they ran in.
+  save('sub', now - 1000, [sys, brief], { workspaceIdentifier: undefined, subagentInfo: { parentComposerId: 'parent', toolCallId: 'tool_1', subagentTypeName: 'explore' } });
+  history.recordChat(db, 'parent', dir, undefined, options);
+
+  const sub = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat parent', 'subagents', 'Chat sub', 'meta.json'), 'utf8'));
+  const parent = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat parent', 'meta.json'), 'utf8'));
+  assert.ok(parent.sentContext[0].workspaceFolders.length > 0, 'the parent has folders');
+  assert.deepStrictEqual(sub.sentContext[0].workspaceFolders, parent.sentContext[0].workspaceFolders);
+  assert.deepStrictEqual(sub.sentContext[0].parts, parent.sentContext[0].parts);
+});
+
 test('plugin database ids are taken from a part Cursor kept',{ skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
   const root = tmp(t);
   const { home, ws } = sourcesFixture(root);

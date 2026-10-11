@@ -220,7 +220,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   // A subagent's messages carry the same context parts as the root's (the wire shows the same
   // blob ids). A message seen before its blob was written is new when the blob arrives.
   const sent = sentContext.record({
-    dir, composer, hashes, db, userBlocks,
+    dir, composer: { ...composer, workspaceIdentifier: workspaceIdentifierOf(db, composer) }, hashes, db, userBlocks,
     seenBefore: new Set((previous.seen || []).filter((h) => !fetched.has(h))),
     readMessage: (hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined),
   }, options.sentContext);
@@ -290,6 +290,19 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   recordThinking(db, dir, chatDir, meta, composer.conversationState);
   writeTranscript(db, dir, chatDir, meta, hashes);
   return recorded + 1;
+}
+
+// The workspace a chat ran in. A subagent runs in its parent's: Cursor stores none for some
+// subagents, and every other one names its parent's folders, so the parent's is used then.
+function workspaceIdentifierOf(db, composer) {
+  let c = composer;
+  const seen = new Set();
+  while (c && !c.workspaceIdentifier && c.subagentInfo && c.subagentInfo.parentComposerId && !seen.has(c.subagentInfo.parentComposerId)) {
+    seen.add(c.subagentInfo.parentComposerId);
+    const row = store.getValue(db, `composerData:${c.subagentInfo.parentComposerId}`);
+    c = row === undefined ? undefined : JSON.parse(row);
+  }
+  return c && c.workspaceIdentifier;
 }
 
 // The parent's Task call that spawned a subagent. Cursor keeps only the latest one (a resumed

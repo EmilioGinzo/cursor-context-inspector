@@ -700,6 +700,74 @@ test('the store is searched for replaced results only once a run has ended, and 
     store.blobsNaming = realScan;
   }
 });
+test('a reply interrupted by the next prompt is recorded from the store, where it was in the chat', () => {
+  const store = require('../src/cursorStore.cjs');
+  const realScan = store.blobsNaming;
+  let scans = 0;
+  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
+  try {
+    const { db, save, dir } = setup();
+    const interrupted = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'text', text: 'Session is up and responding.' }] };
+    const second = { role: 'user', content: 'second question' };
+    save(1000, [sys, first]);
+    // Cursor stored the reply (not in any prompt: the run was interrupted), then the next prompt.
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(interrupted)}`, Buffer.from(JSON.stringify(interrupted)));
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-1', JSON.stringify({ type: 2, text: 'Session is up and responding.' }));
+    save(2000, [sys, first, second]);
+    history.recordUpdatedSince(db, dir, 0);
+    const chat = path.join(dir, 'chats', 'History chat');
+    const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+    assert.deepStrictEqual(meta.seen, [sys, first, interrupted, second].map(hashOf));
+    assert.deepStrictEqual(meta.scannedReplies, ['reply-1']);
+    assert.match(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /Session is up and responding\./);
+    assert.strictEqual(scans, 1);
+    // Checked once: a later tick does not search for the same bubble again.
+    save(3000, [sys, first, second]);
+    history.recordUpdatedSince(db, dir, 2000);
+    assert.strictEqual(scans, 1);
+  } finally {
+    store.blobsNaming = realScan;
+  }
+});
+
+test('a reply Cursor keeps in no stored message is checked once and not recorded', () => {
+  const { db, save, dir } = setup();
+  save(1000, [sys, first]);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-2', JSON.stringify({ type: 2, text: 'Never stored.' }));
+  history.recordUpdatedSince(db, dir, 0);
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.seen, [sys, first].map(hashOf));
+  assert.deepStrictEqual(meta.scannedReplies, ['reply-2']);
+});
+
+test('a reply in the prompt is matched without a search of the store', () => {
+  const store = require('../src/cursorStore.cjs');
+  const realScan = store.blobsNaming;
+  let scans = 0;
+  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
+  try {
+    const { db, save, dir } = setup();
+    save(1000, [sys, first, answer]);
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-3', JSON.stringify({ type: 2, text: 'first answer' }));
+    history.recordUpdatedSince(db, dir, 0);
+    assert.strictEqual(scans, 0);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8')).scannedReplies, ['reply-3']);
+  } finally {
+    store.blobsNaming = realScan;
+  }
+});
+
+test('a short thought Cursor showed on a bubble is not held by a longer step that contains it', () => {
+  const { db, save, dir } = setup();
+  const reply = { role: 'assistant', content: [{ type: 'text', text: 'Hi.' }] };
+  save(1000, [sys, first, reply], { turns: [[step.thinking('Ok.'), step.text('Hi.')]] });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:bubble-3',
+    JSON.stringify({ type: 2, text: '', thinking: { text: 'Ok. Then I check the folder first.', signature: 'sig' } }));
+  history.recordUpdatedSince(db, dir, 0);
+  const thinking = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'thinking.json'), 'utf8'));
+  assert.deepStrictEqual(thinking.filter((e) => e.source === 'bubble').map((e) => e.text), ['Ok. Then I check the folder first.']);
+});
+
 test('thinking Cursor showed on a bubble, and no turn step kept, is recorded with its place not known', () => {
   const { db, save, dir } = setup();
   const reply = { role: 'assistant', content: [{ type: 'text', text: 'Hi.' }] };

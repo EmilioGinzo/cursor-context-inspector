@@ -217,17 +217,32 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const turns = turnSteps.loadTurns(db, composer.conversationState);
   const scanned = new Set(previous.scannedCalls || []);
   const unscanned = [...new Set(turns.flatMap((t) => t.steps).map(turnSteps.callIdOf).filter(Boolean))].filter((id) => !scanned.has(id));
-  const scanNow = unscanned.length > 0 && options.scanCalls !== false && !(composer.generatingBubbleIds || []).length;
+  // The replies Cursor showed (bubble text) that no recorded message holds: an interrupted reply is kept
+  // by Cursor outside the prompt. Each bubble is checked once (scannedReplies), and searched for with the calls.
+  const repliedBefore = previous.scannedReplies || [];
+  const replied = new Set(repliedBefore);
+  const pending = turnSteps.bubbleReplies(db, composerId).filter((r) => !replied.has(r.bubble));
+  const texts = pending.length ? recordedTexts(db, dir, [...hashes, ...archived, ...(previous.seen || [])]) : new Set();
+  const matched = pending.filter((r) => texts.has(r.text.trim()));
+  const missing = pending.filter((r) => !texts.has(r.text.trim()));
+  const scanNow = (unscanned.length > 0 || missing.length > 0) && options.scanCalls !== false && !(composer.generatingBubbleIds || []).length;
+  const replyMarks = (scanNow ? pending : matched).map((r) => r.bubble);
   const found = new Map();
   if (scanNow) {
     // Between the rows of the chat's own blobs (Cursor stores a run's messages as it goes).
     const own = [...hashes, ...archived, ...turns.flatMap((t) => [t.turn, ...t.steps.map((s) => s.hash)])]
       .map((h) => store.rowidOf(db, `agentKv:blob:${h}`)).filter((r) => r !== undefined);
     const ids = new Set(unscanned);
-    for (const { hash, value } of own.length ? store.blobsNaming(db, unscanned, Math.min(...own), Math.max(...own)) : []) {
+    // The text as Cursor stores it (JSON), a prefix of it: the candidates are checked below.
+    const probes = missing.map((r) => JSON.stringify(r.text).slice(1, -1).slice(0, 120));
+    const replyTexts = new Set(missing.map((r) => r.text.trim()));
+    for (const { hash, value } of own.length ? store.blobsNaming(db, [...unscanned, ...probes], Math.min(...own), Math.max(...own)) : []) {
       let message;
       try { message = JSON.parse(value.toString('utf8')); } catch { continue; }
-      if (message && Array.isArray(message.content) && message.content.some((p) => p && ids.has(p.toolCallId))) found.set(hash, value);
+      if (!message || !Array.isArray(message.content)) continue;
+      const call = message.content.some((p) => p && ids.has(p.toolCallId));
+      const reply = message.role === 'assistant' && message.content.some((p) => p && p.type === 'text' && replyTexts.has(String(p.text).trim()));
+      if (call || reply) found.set(hash, value);
     }
   }
   // Before the check below: Cursor may write a message after the prompt that lists it.
@@ -270,13 +285,14 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
       remember(meta);
       if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
       if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
+      if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
       if (scanNow || meta.seen.length !== seenBefore) {
         const states = recordReplaced(dir, chatDir, composerId, composer, hashes, meta.seen, new Set(archived), options.clock || Date.now);
         if (states) meta.snapshots = (meta.snapshots || 0) + states;
       }
       const relinked = addToolCallId(meta, composer);
       const changed = meta.seen.length !== seenBefore;
-      if (sent || scanNow || changed || relinked) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+      if (sent || scanNow || changed || relinked || replyMarks.length) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       // The late message may be the one a thinking belongs to.
       if (fetched.size || changed) {
         recordThinking(db, dir, chatDir, meta, turns, composerId);
@@ -316,6 +332,7 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...previous };
   remember(meta);
   if (scanNow) meta.scannedCalls = [...scanned, ...unscanned];
+  if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
   Object.assign(meta, {
     name: composer.name || 'Untitled chat',
     model: snapshot.model,
@@ -374,6 +391,21 @@ function placeStored(db, list, hashes) {
     const at = row === undefined ? -1 : list.findIndex((x) => { const r = rowOf(x); return r !== undefined && r > row; });
     if (at === -1) list.push(h); else list.splice(at, 0, h);
   }
+}
+
+// The texts (trimmed) of the assistant messages under these hashes. A message not written yet is read from the store.
+function recordedTexts(db, dir, hashes) {
+  const out = new Set();
+  for (const h of new Set(hashes)) {
+    const file = path.join(dir, 'blobs', `${h}.json`);
+    let message;
+    if (fs.existsSync(file)) message = readJson(file, undefined);
+    else { try { message = JSON.parse(store.getValue(db, `agentKv:blob:${h}`) || 'null'); } catch { message = undefined; } }
+    if (message && message.role === 'assistant' && Array.isArray(message.content)) {
+      for (const p of message.content) if (p && p.type === 'text' && typeof p.text === 'string') out.add(p.text.trim());
+    }
+  }
+  return out;
 }
 
 // A tool result Cursor replaced in the prompt: the prompt of the model call that followed it still held

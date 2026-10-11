@@ -99,22 +99,38 @@ function callIdOf(step) {
 // Returns { bubble, text } for each one no turn step of `turns` holds: the thinking Cursor showed but did
 // not keep as a step. Bubbles are read by key range, so the chat's keys are found without a table scan.
 function bubbleThinking(db, composerId, turns) {
-  const prefix = `bubbleId:${composerId}:`;
   const steps = turns.flatMap((t) => t.steps).filter((s) => s.kind === 'thinking' && s.text).map((s) => s.text);
   const out = [];
-  for (const row of db.prepare('SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(prefix, `bubbleId:${composerId};`)) {
-    let bubble;
-    try {
-      bubble = JSON.parse(typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('utf8'));
-    } catch { continue; }
-    const text = bubble && bubble.thinking && bubble.thinking.text;
+  for (const { bubble, value } of chatBubbles(db, composerId)) {
+    const text = value.thinking && value.thinking.text;
     if (typeof text !== 'string' || !text.trim()) continue;
-    // The same thought when one holds the other's start (a step may be cut or hold the same text).
-    const kept = steps.some((t) => t.trim().includes(text.trim().slice(0, 200)) || text.trim().includes(t.trim().slice(0, 200)));
-    if (!kept) out.push({ bubble: row.key.slice(prefix.length), text });
+    if (!steps.some((t) => t.trim().includes(text.trim().slice(0, 200)) || text.trim().includes(t.trim().slice(0, 200)))) out.push({ bubble, text });
   }
   return out;
 }
+
+// Assistant replies Cursor showed on the chat's bubbles: [{ bubble, text }]. A reply interrupted by the
+// next prompt is kept by Cursor in a message outside the prompt; its bubble is the only other place its text is.
+function bubbleReplies(db, composerId) {
+  return chatBubbles(db, composerId)
+    .filter(({ value }) => value.type === 2 && typeof value.text === 'string' && value.text.trim())
+    .map(({ bubble, value }) => ({ bubble, text: value.text }));
+}
+
+// The chat's bubbles (bubbleId:<chat>:<bubble>), parsed: [{ bubble, value }]. Read by key range.
+function chatBubbles(db, composerId) {
+  const prefix = `bubbleId:${composerId}:`;
+  const out = [];
+  for (const row of db.prepare('SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(prefix, `bubbleId:${composerId};`)) {
+    let value;
+    try {
+      value = JSON.parse(typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('utf8'));
+    } catch { continue; }
+    if (value && typeof value === 'object') out.push({ bubble: row.key.slice(prefix.length), value });
+  }
+  return out;
+}
+
 
 // One step: { hash, kind: 'thinking' | 'text' | 'tool-call' | 'missing', text?, durationMs?, data? }.
 // data (tool calls only) is the step's bytes, to find the call's id and arguments in.
@@ -218,4 +234,4 @@ function placeThinking(turns, messages) {
   return out;
 }
 
-module.exports = { fields, turnHashes, archivedHashes, callIdOf, bubbleThinking, loadTurns, placeThinking };
+module.exports = { fields, turnHashes, archivedHashes, callIdOf, bubbleThinking, bubbleReplies, loadTurns, placeThinking };

@@ -104,7 +104,7 @@ function bubbleThinking(db, composerId, turns) {
   for (const { bubble, value } of chatBubbles(db, composerId)) {
     const text = value.thinking && value.thinking.text;
     if (typeof text !== 'string' || !text.trim()) continue;
-    if (!steps.some((t) => t.trim().includes(text.trim().slice(0, 200)) || text.trim().includes(t.trim().slice(0, 200)))) out.push({ bubble, text });
+    if (!steps.some((t) => sameText(t, text))) out.push({ bubble, text });
   }
   return out;
 }
@@ -131,6 +131,14 @@ function chatBubbles(db, composerId) {
   return out;
 }
 
+// The same thought: equal, or one holds the other's start (a step may be cut). Texts shorter than 40
+// characters must be equal: a short step inside a longer thought is not the same thought.
+function sameText(a, b) {
+  const s = a.trim();
+  const u = b.trim();
+  const n = Math.min(200, s.length, u.length);
+  return n >= 40 ? s.includes(u.slice(0, n)) || u.includes(s.slice(0, n)) : s === u;
+}
 
 // One step: { hash, kind: 'thinking' | 'text' | 'tool-call' | 'missing', text?, durationMs?, data? }.
 // data (tool calls only) is the step's bytes, to find the call's id and arguments in.

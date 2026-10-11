@@ -217,9 +217,9 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   }
   const metaFile = path.join(chatDir, 'meta.json');
   const previous = readJson(metaFile, {});
-  // Subagents' requests are not recorded on the wire yet: their context stays unknown. A message
-  // seen before its blob was written is new when the blob arrives.
-  const sent = composer.subagentInfo ? undefined : sentContext.record({
+  // A subagent's messages carry the same context parts as the root's (the wire shows the same
+  // blob ids). A message seen before its blob was written is new when the blob arrives.
+  const sent = sentContext.record({
     dir, composer, hashes, db, userBlocks,
     seenBefore: new Set((previous.seen || []).filter((h) => !fetched.has(h))),
     readMessage: (hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined),

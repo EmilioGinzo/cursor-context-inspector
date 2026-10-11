@@ -115,14 +115,14 @@ function chatDb(ws) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
   const put = (k, v) => db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(k, v);
-  const save = (id, lastUpdatedAt, messages) => {
+  const save = (id, lastUpdatedAt, messages, extra = {}) => {
     const state = Buffer.concat(messages.flatMap((m) => {
       const raw = Buffer.from(JSON.stringify(m));
       const hash = crypto.createHash('sha256').update(raw).digest();
       put(`agentKv:blob:${hash.toString('hex')}`, raw);
       return [Buffer.from([0x0a, 0x20]), hash];
     }));
-    put(`composerData:${id}`, JSON.stringify({ name: `Chat ${id}`, lastUpdatedAt, conversationState: `~${state.toString('base64')}`, workspaceIdentifier: { uri: { fsPath: ws } } }));
+    put(`composerData:${id}`, JSON.stringify({ name: `Chat ${id}`, lastUpdatedAt, conversationState: `~${state.toString('base64')}`, workspaceIdentifier: { uri: { fsPath: ws } }, ...extra }));
   };
   return { db, put, save };
 }
@@ -192,7 +192,32 @@ test('the recorder keeps the context sent with each new user message, once, and 
   assert.ok(!fs.existsSync(path.join(plain, 'context')));
 });
 
-test('plugin database ids are taken from a part Cursor kept', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+test('a subagent chat keeps the context sent with its messages, the same parts as its root', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const dir = path.join(root, 'history');
+  const { db, save } = chatDb(ws);
+  const sys = { role: 'system', content: 'You are an agent.' };
+  const brief = { role: 'user', content: '<user_query>\nreview the cases\n</user_query>' };
+  const now = Date.now();
+  const options = { sentContext: { enabled: true, appDir: APP, home, now } };
+
+  save('parent', now - 2000, [sys, { role: 'user', content: '<user_query>\nstart\n</user_query>' }], { subagentComposerIds: ['sub'] });
+  save('sub', now - 1000, [sys, brief], { subagentInfo: { parentComposerId: 'parent', toolCallId: 'tool_1', subagentTypeName: 'explore' } });
+  history.recordChat(db, 'parent', dir, undefined, options);
+
+  const sub = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat parent', 'subagents', 'Chat sub', 'meta.json'), 'utf8'));
+  const parent = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat parent', 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(sub.sentContext.map((e) => e.messages), [[hashOf(brief)]], 'the brief is the user message a subagent is sent with');
+  assert.deepStrictEqual(Object.keys(sub.sentContext[0].parts), rc.PARTS);
+  assert.strictEqual(sub.sentContext[0].parts.rules.items, 6);
+  // Cursor sends a subagent the same parts it sends the root: the same ids, so the same bytes.
+  assert.deepStrictEqual(sub.sentContext[0].parts, parent.sentContext[0].parts);
+  // Stored once for the chat and its subagent.
+  assert.ok(fs.existsSync(path.join(dir, 'context', `${sub.sentContext[0].parts.rules.id}.bin`)));
+});
+
+test('plugin database ids are taken from a part Cursor kept',{ skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
   const root = tmp(t);
   const { home, ws } = sourcesFixture(root);
   const rev = 'a'.repeat(40);

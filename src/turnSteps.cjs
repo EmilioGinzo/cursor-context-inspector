@@ -70,6 +70,52 @@ function turnHashes(conversationState) {
   }
 }
 
+// The state's summary archive (conversationState field 13): a blob listing, as message blob ids, the
+// messages summarization took out of the prompt. The prompt names none of them; Cursor keeps the blobs.
+function archivedHashes(db, conversationState) {
+  if (typeof conversationState !== 'string' || !conversationState.startsWith('~')) return [];
+  const out = [];
+  try {
+    for (const f of fields(Buffer.from(conversationState.slice(1), 'base64'))) {
+      if (f.no !== 13 || !Buffer.isBuffer(f.value) || f.value.length !== 32) continue;
+      const archive = getBytes(db, `agentKv:blob:${f.value.toString('hex')}`);
+      if (!archive) continue;
+      for (const e of fields(archive)) if (e.no === 1 && Buffer.isBuffer(e.value) && e.value.length === 32) out.push(e.value.toString('hex'));
+    }
+  } catch { /* a state this cannot read archives nothing */ }
+  return [...new Set(out)];
+}
+
+// The call id of a tool-call step (field 57 of the call): the id its tool-call part and its tool-result
+// message share. Undefined for other steps.
+function callIdOf(step) {
+  if (step.kind !== 'tool-call') return undefined;
+  const call = fields(step.data)[0];
+  const id = call && Buffer.isBuffer(call.value) ? field(call.value, 57) : undefined;
+  return Buffer.isBuffer(id) ? id.toString('utf8') : undefined;
+}
+
+// The thinking Cursor's UI keeps on the chat's assistant bubbles (bubbleId:<chat>:<bubble>, thinking.text).
+// Returns { bubble, text } for each one no turn step of `turns` holds: the thinking Cursor showed but did
+// not keep as a step. Bubbles are read by key range, so the chat's keys are found without a table scan.
+function bubbleThinking(db, composerId, turns) {
+  const prefix = `bubbleId:${composerId}:`;
+  const steps = turns.flatMap((t) => t.steps).filter((s) => s.kind === 'thinking' && s.text).map((s) => s.text);
+  const out = [];
+  for (const row of db.prepare('SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(prefix, `bubbleId:${composerId};`)) {
+    let bubble;
+    try {
+      bubble = JSON.parse(typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('utf8'));
+    } catch { continue; }
+    const text = bubble && bubble.thinking && bubble.thinking.text;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    // The same thought when one holds the other's start (a step may be cut or hold the same text).
+    const kept = steps.some((t) => t.trim().includes(text.trim().slice(0, 200)) || text.trim().includes(t.trim().slice(0, 200)));
+    if (!kept) out.push({ bubble: row.key.slice(prefix.length), text });
+  }
+  return out;
+}
+
 // One step: { hash, kind: 'thinking' | 'text' | 'tool-call' | 'missing', text?, durationMs?, data? }.
 // data (tool calls only) is the step's bytes, to find the call's id and arguments in.
 function decodeStep(hash, data) {
@@ -172,4 +218,4 @@ function placeThinking(turns, messages) {
   return out;
 }
 
-module.exports = { fields, turnHashes, loadTurns, placeThinking };
+module.exports = { fields, turnHashes, archivedHashes, callIdOf, bubbleThinking, loadTurns, placeThinking };

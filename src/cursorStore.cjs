@@ -54,6 +54,29 @@ function getValue(db, key) {
   return typeof v === 'string' ? v : Buffer.from(v).toString('utf8');
 }
 
+// The row (insertion order) a key was stored at, undefined when absent.
+function rowidOf(db, key) {
+  const row = db.prepare('SELECT rowid AS r FROM cursorDiskKV WHERE key = ?').get(key);
+  return row ? row.r : undefined;
+}
+
+// The message blobs stored between rows `from` and `to` whose text names one of `ids` (a tool call's
+// id, in its tool-call and tool-result parts): [{ hash, value }]. Nothing in a chat's state names the
+// message a call's result had before it was replaced in the prompt, but Cursor still stores it, between
+// the blobs of the run that made the call. The rows are the chat's own span (history.cjs), so the read
+// stays small: a whole-store read would cost seconds per chat.
+function blobsNaming(db, ids, from, to) {
+  const needles = [...new Set(ids)].filter(Boolean).map((id) => Buffer.from(id, 'utf8'));
+  if (!needles.length) return [];
+  const out = [];
+  const rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE rowid BETWEEN ? AND ? AND key >= 'agentKv:blob:' AND key < 'agentKv:blob;'").iterate(from, to);
+  for (const row of rows) {
+    const v = typeof row.value === 'string' ? Buffer.from(row.value, 'utf8') : Buffer.from(row.value);
+    if (needles.some((n) => v.includes(n))) out.push({ hash: row.key.slice('agentKv:blob:'.length), value: v });
+  }
+  return out;
+}
+
 // Subagent chats are excluded by default; they are reached through their parent.
 function listComposers(db, limit = 60, { includeSubagents = false } = {}) {
   const rows = db.prepare(`
@@ -580,6 +603,8 @@ module.exports = {
   defaultDatabasePath,
   openDatabase,
   getValue,
+  rowidOf,
+  blobsNaming,
   messageText,
   ancestors,
   loadSubagents,

@@ -313,9 +313,12 @@ function checkUserText(run, addedMsgs, add, ctx) {
 
 function checkAgentStream(run, addedMsgs, add, rec) {
   const assistant = addedMsgs.filter((x) => x.m.role === 'assistant').flatMap((x) => parts(x.m).map((p) => ({ id: x.id, p })));
-  const texts = assistant.filter((a) => a.p.type === 'text').map((a) => a.p.text || '');
-  // Thinking the prompt keeps only encrypted is recorded from Cursor's turn steps, on its message.
   const addedIds = new Set(addedMsgs.map((x) => x.id));
+  // A reply interrupted by the next prompt is never on the wire, but the record keeps it as a message.
+  const kept = rec.seen.filter((h) => !addedIds.has(h)).map((h) => rec.blob(h)).filter((b) => b && b.message && b.message.role === 'assistant')
+    .flatMap((b) => parts(b.message).filter((p) => p.type === 'text').map((p) => p.text || ''));
+  const texts = [...assistant.filter((a) => a.p.type === 'text').map((a) => a.p.text || ''), ...kept];
+  // Thinking the prompt keeps only encrypted is recorded from Cursor's turn steps, on its message.
   // Thinking shown on a bubble, with no message to place it on, is recorded unplaced (source 'bubble').
   const placed = (rec.thinking || []).filter((t) => addedIds.has(t.message) || t.source === 'bubble').map((t) => t.text);
   const thoughts = [...assistant.filter((a) => a.p.type === 'reasoning' || a.p.type === 'redacted-reasoning').map((a) => a.p.text || ''), ...placed];

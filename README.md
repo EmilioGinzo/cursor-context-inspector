@@ -267,7 +267,9 @@ request, rebuilt (not in the prompt)**. Only messages the recorder sees within 1
 are matched with a rebuild (older chats get none: the files may have changed).
 
 The MCP part follows what the request carries: the tools of Cursor's built-in
-browser and dev-control servers in full, and every other server's tools by name
+servers in full (the set Cursor's bundle names, `rFE` in `cursor-agent-exec`: the
+browser and dev-control servers; the built-in list is used when the bundle is not
+found), and every other server's tools by name
 with their annotations (`readOnlyHint` and the like), plus each server's
 folder and tool files. Annotations are not in the snapshots; they are read from
 the copies Cursor kept of this part in its database (`context/tool-annotations.json`,

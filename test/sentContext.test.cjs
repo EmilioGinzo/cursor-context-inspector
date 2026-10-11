@@ -410,3 +410,39 @@ test('a user message whose blob Cursor writes late still gets its context', { sk
   assert.deepStrictEqual(meta().sentContext.map((e) => e.messages), [[hashOf(q)]]);
   assert.match(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8'), /Context sent with this message, rebuilt/);
 });
+
+test('the MCP servers sent inline are the set in Cursor\'s bundle (rFE), not a list kept here', (t) => {
+  // Minified the way the bundle has it: the export names a variable, the Set is built from string constants.
+  const bundle = 'var __webpack_modules__={78772:(e,t,r)=>{"use strict";r.d(t,{rFE:()=>Ne,riQ:()=>Me,acw:()=>Oe,iKs:()=>Je});'
+    + 'let x=1,Oe="cursor-dev-control",Je="custom-user-tools",Me="cursor-ide-browser",Be=new Set(["cursor-app-control",Me,Oe]);'
+    + 'function De(e){return!Be.has(e)}const qe="cursor",Ne=new Set([Oe,Me,"my-browser"]);}};';
+  assert.deepStrictEqual([...sources.parseInlineServers(bundle)].sort(), ['cursor-dev-control', 'cursor-ide-browser', 'my-browser']);
+  const root = tmp(t);
+  write(path.join(root, 'extensions', 'cursor-agent-exec', 'dist', 'main.js'), bundle);
+  assert.strictEqual(sources.inlineMcpServers(root).source, 'bundle');
+  assert.deepStrictEqual([...sources.inlineMcpServers(root).servers].sort(), ['cursor-dev-control', 'cursor-ide-browser', 'my-browser']);
+  // No bundle, or one without the set: the built-in list, and the note says so.
+  const none = path.join(root, 'none');
+  assert.strictEqual(sources.inlineMcpServers(none).source, 'fallback');
+  assert.deepStrictEqual([...sources.inlineMcpServers(none).servers], [...sources.INLINE_MCP_SERVERS_FALLBACK]);
+  assert.strictEqual(sources.parseInlineServers('no set here'), undefined);
+  assert.ok(sources.environment({ appDir: none, home: root }).notes.some((n) => /built-in list/.test(n)));
+  // The part follows the bundle: a server it names is sent in full, one it does not name by name only.
+  const home = path.join(root, 'home');
+  const ws = path.join(root, 'ws');
+  fs.mkdirSync(ws, { recursive: true });
+  const slug = ws.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  const mcps = path.join(home, '.cursor', 'projects', slug, 'mcps');
+  write(path.join(mcps, 'my-browser', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'my-browser', serverName: 'Mine' }));
+  write(path.join(mcps, 'my-browser', 'tools', 'open.json'), JSON.stringify({ name: 'open', description: 'Opens.' }));
+  write(path.join(mcps, 'other', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'other', serverName: 'Other' }));
+  write(path.join(mcps, 'other', 'tools', 'x.json'), JSON.stringify({ name: 'x', description: 'X.' }));
+  const { parts } = sources.buildParts([ws], { home, appDir: root });
+  assert.deepStrictEqual(parts.mcps.tools.map((x) => x.name), ['my-browser-open']);
+});
+
+test('the bundle of this Cursor, when it is installed, names the browser server inline', { skip: !fs.existsSync(path.join(APP, 'extensions', 'cursor-agent-exec', 'dist', 'main.js')) && 'needs Cursor\'s bundle' }, () => {
+  const { source, servers } = sources.inlineMcpServers(APP);
+  assert.strictEqual(source, 'bundle');
+  assert.ok(servers.has('cursor-ide-browser'));
+});

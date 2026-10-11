@@ -668,11 +668,48 @@ function entries(dir) {
   return out;
 }
 
-// Cursor's built-in servers whose tools go in the request in full (inline): Cursor's AU.rFE in
-// cursor-agent-exec's request context. With the meta-tool descriptors on (Cursor sends them with
-// every request, in all 72 captured runs), the other servers' tools are listed by name only, and
-// read from their definition files when the model asks for them.
-const INLINE_MCP_SERVERS = new Set(['cursor-dev-control', 'cursor-ide-browser']);
+// Cursor's built-in servers whose tools go in the request in full (inline) when the meta-tool
+// descriptors are on (Cursor sends them with every request, in all 72 captured runs): the other
+// servers' tools are listed by name only, and read from their definition files when the model asks.
+// Which servers those are is a set in Cursor's bundle: `Ne=new Set([Oe,Me])`, exported as rFE by
+// cursor-agent-exec (its request context filters `h.rFE.has(e.serverIdentifier)`). It is read from
+// the bundle; the set below is what it held when this was written, used when the bundle does not say.
+const INLINE_MCP_SERVERS_FALLBACK = new Set(['cursor-dev-control', 'cursor-ide-browser']);
+const inlineCache = new Map();
+
+// { servers: Set of server identifiers, source: 'bundle' | 'fallback' }.
+function inlineMcpServers(appDir) {
+  if (inlineCache.has(appDir)) return inlineCache.get(appDir);
+  let found;
+  try {
+    found = parseInlineServers(read(path.join(appDir, 'extensions', 'cursor-agent-exec', 'dist', 'main.js')));
+  } catch {
+    /* no bundle here */
+  }
+  const out = found ? { servers: found, source: 'bundle' } : { servers: INLINE_MCP_SERVERS_FALLBACK, source: 'fallback' };
+  inlineCache.set(appDir, out);
+  return out;
+}
+
+// The identifiers of the set exported as rFE: the export names its variable, the variable is the
+// Set (defined after the export, in the same module), and its members are string constants
+// (defined before it, as `Oe="cursor-dev-control"`) or string literals. undefined when any is missing.
+function parseInlineServers(text) {
+  const exp = /[{,]rFE:\(\)=>([\w$]+)[,}]/.exec(text);
+  if (!exp) return undefined;
+  const name = exp[1].replace(/\$/g, '\\$');
+  const at = text.slice(exp.index).search(new RegExp(`[,\\s]${name}=new Set\\(\\[`));
+  if (at < 0) return undefined;
+  const setAt = exp.index + at;
+  const members = /\[([^\]]*)\]\)/.exec(text.slice(setAt))[1].split(',').map((s) => s.trim()).filter(Boolean);
+  const ids = members.map((m) => {
+    if (/^"[^"]+"$/.test(m)) return m.slice(1, -1);
+    const id = m.replace(/\$/g, '\\$');
+    const defs = [...text.slice(Math.max(0, setAt - 100000), setAt).matchAll(new RegExp(`[,\\s(]${id}="([^"]+)"`, 'g'))];
+    return defs.length ? defs[defs.length - 1][1] : undefined;
+  });
+  return ids.every(Boolean) && ids.length ? new Set(ids) : undefined;
+}
 
 // Tool annotations (readOnlyHint...) are not in the MCP folders: they come from the servers, and
 // Cursor keeps them only inside the meta-tool parts it stored (sentContext.cjs reads them).
@@ -719,7 +756,7 @@ function mcpsPart(env, workspacePaths) {
     return a === undefined ? {} : { annotations_json: a };
   };
   return {
-    tools: servers.filter((s) => INLINE_MCP_SERVERS.has(s.id)).flatMap((s) => s.tools.map((t) => ({
+    tools: servers.filter((s) => (env.inlineServers || INLINE_MCP_SERVERS_FALLBACK).has(s.id)).flatMap((s) => s.tools.map((t) => ({
       name: `${s.id}-${t.name}`, provider_identifier: s.name, tool_name: t.name, description: t.description,
       input_schema_json: t.arguments === undefined ? undefined : JSON.stringify(t.arguments),
     }))),
@@ -770,6 +807,9 @@ function dynamicContext(env, workspacePaths) {
 // The environment the rebuild reads: Cursor's app (for ripgrep and gray-matter), the home folder.
 function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations } = {}) {
   const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, notes: [] };
+  const inline = inlineMcpServers(appDir);
+  env.inlineServers = inline.servers;
+  if (inline.source === 'fallback') env.notes.push('Cursor\'s bundle not read: the MCP servers sent inline are the built-in list');
   const rg = path.join(appDir, 'node_modules', '@vscode', 'ripgrep', 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (isFile(rg)) env.rg = rg;
   else env.notes.push('Cursor\'s ripgrep not found: rule files listed in sorted order, not Cursor\'s');
@@ -858,4 +898,4 @@ function stripJsonComments(text) {
 // Installed plugins: [{ name, marketplace, rev }] (the keys of env.pluginIds are `${name}-${rev}`).
 const installedPlugins = (env) => plugins(env).map(({ name, marketplace, rev }) => ({ name, marketplace, rev }));
 
-module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey };
+module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey, inlineMcpServers, parseInlineServers, INLINE_MCP_SERVERS_FALLBACK };

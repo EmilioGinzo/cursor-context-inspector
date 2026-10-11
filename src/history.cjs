@@ -336,15 +336,52 @@ function recordThinking(db, dir, chatDir, meta, conversationState) {
   writeAtomic(file, JSON.stringify([...kept, ...current.filter((e) => !known.has(e.step))], null, 2));
 }
 
+// The Task calls whose results name each subagent (its composer id is in the result): the calls
+// a resumed subagent was started or resumed by, which Cursor's DB no longer points to. Returns
+// Map(composerId -> [toolCallId]).
+function taskCallsFor(messages, composerIds) {
+  const out = new Map();
+  for (const m of messages) {
+    if (!m || m.role !== 'tool' || !Array.isArray(m.content)) continue;
+    for (const part of m.content) {
+      if (!part || !part.toolCallId || part.toolName !== 'Task') continue;
+      const text = JSON.stringify(part);
+      for (const id of composerIds) {
+        const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(text)) out.set(id, [...new Set([...(out.get(id) || []), part.toolCallId])]);
+      }
+    }
+  }
+  return out;
+}
+
+// Adds toolCallIds to a subagent's meta.json (a subagent recorded before, or with a call the DB
+// no longer names). Never drops one.
+function keepToolCallIds(file, ids) {
+  const meta = readJson(file, undefined);
+  if (!meta || !meta.seen) return;
+  const merged = [...new Set([...(meta.toolCallIds || []), ...ids])];
+  if (merged.length === (meta.toolCallIds || []).length) return;
+  meta.toolCallIds = merged;
+  writeAtomic(file, JSON.stringify(meta, null, 2));
+}
+
 function writeTranscript(db, dir, chatDir, meta, currentHashes) {
   const folders = new Map([...folderOwners(path.join(chatDir, 'subagents'))].map(([entry, id]) => [id, entry]));
   // The tool calls each subagent's own meta.json kept (see addToolCallId).
   const known = (id) => (folders.has(id) ? readJson(path.join(chatDir, 'subagents', folders.get(id), 'meta.json'), {}).toolCallIds || [] : []);
-  const subagents = store.loadSubagents(db, meta.subagentIds || [], known).map((s) => ({ ...s, folder: folders.get(s.composerId) }));
+  const recorded = meta.seen.map((hash) => ({ hash, message: readJson(path.join(dir, 'blobs', `${hash}.json`), undefined) })).filter((m) => m.message);
+  const ids = meta.subagentIds || [];
+  const byResult = taskCallsFor(recorded.map((m) => m.message), ids);
+  const subagents = store.loadSubagents(db, ids, known).map((s) => {
+    const toolCallIds = [...new Set([...s.toolCallIds, ...(byResult.get(s.composerId) || [])])];
+    const folder = folders.get(s.composerId);
+    if (folder) keepToolCallIds(path.join(chatDir, 'subagents', folder, 'meta.json'), toolCallIds);
+    return { ...s, toolCallIds, folder };
+  });
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
   const thinking = readJson(path.join(chatDir, 'thinking.json'), []);
   writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
-  const recorded = meta.seen.map((hash) => ({ hash, message: readJson(path.join(dir, 'blobs', `${hash}.json`), undefined) })).filter((m) => m.message);
   const sentWith = new Map((meta.sentContext || []).flatMap((e) => e.messages.map((h) => [h, e])));
   writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, recorded.map((m) => m.message), {
     subagents, parent, thinking: thinkingByMessage(thinking, recorded.map((m) => m.hash)),

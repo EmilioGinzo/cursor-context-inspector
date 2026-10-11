@@ -224,6 +224,22 @@ test('a resumed subagent keeps every Task call that spawned it, and is linked fr
   assert.strictEqual(chatMd.split('↳ Subagent: [child]').length - 1, 2, 'chat.md links both too');
 });
 
+test('the Task calls a resumed subagent was named in are kept from the recorded results', () => {
+  const { db, chat, dir } = multi();
+  const sys = { role: 'system', content: 'You are an agent.' };
+  const spawnBy = (callId) => ({ role: 'assistant', content: [{ type: 'text', text: 'delegating' }, { type: 'tool-call', toolName: 'Subagent', toolCallId: callId, args: { prompt: 'go' } }] });
+  const resultOf = (callId) => ({ role: 'tool', content: [{ type: 'tool-result', toolCallId: callId, toolName: 'Task', result: `Subagent child finished.\nagent_id: child\n` }] });
+  // Cursor's DB names only the latest call; the first one is in the recorded messages.
+  chat('child', 1001, [sys, { role: 'user', content: 'child task' }, spawnBy('tool_bbb')], { subagentComposerIds: ['grandchild'], subagentInfo: { parentComposerId: 'root', toolCallId: 'tool_ccc', subagentTypeName: 'explore' } });
+  chat('root', 1003, [sys, { role: 'user', content: 'first' }, spawnBy('tool_aaa'), resultOf('tool_aaa'), spawnBy('tool_ccc'), resultOf('tool_ccc')], { subagentComposerIds: ['child'] });
+  history.recordUpdatedSince(db, dir, 0);
+  const root = path.join(dir, 'chats', 'root');
+  const kept = JSON.parse(fs.readFileSync(path.join(root, 'subagents', 'child', 'meta.json'), 'utf8')).toolCallIds;
+  assert.deepStrictEqual([...kept].sort(), ['tool_aaa', 'tool_ccc']);
+  const rootMd = fs.readFileSync(path.join(root, 'transcript.md'), 'utf8');
+  assert.strictEqual(rootMd.split('↳ Subagent: [child]').length - 1, 2, 'linked from both Task calls');
+});
+
 test('flat layout from earlier versions is moved under the parent', () => {
   const { db, dir } = multi();
   // Simulate 0.5/0.6: every chat at chats/<id>.

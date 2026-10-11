@@ -71,6 +71,56 @@ function pluginIds(db, dir, plugins, now) {
   return known;
 }
 
+// MCP tool annotations (readOnlyHint...) are not on disk. Cursor keeps them in the meta-tool parts it
+// stored in agentKv (the server asked for those bytes), so they are read from there: scanned at most
+// once an hour, remembered in context/tool-annotations.json. A tool seen with several values keeps
+// the most frequent one.
+const ANNOTATION_RESCAN_MS = 60 * 60 * 1000;
+
+// { annotations: Map of key -> annotations_json, conflicts: tools seen with more than one value }.
+function toolAnnotations(db, dir, now) {
+  const file = path.join(dir, 'context', 'tool-annotations.json');
+  let known = { scannedAt: 0, tools: {}, conflicts: 0 };
+  try {
+    known = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    /* none yet */
+  }
+  if (now - known.scannedAt >= ANNOTATION_RESCAN_MS) {
+    const found = scanAnnotations(db);
+    known = { scannedAt: now, tools: { ...known.tools, ...found.tools }, conflicts: found.conflicts };
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(known, null, 2));
+  }
+  return { annotations: new Map(Object.entries(known.tools)), conflicts: known.conflicts };
+}
+
+function scanAnnotations(db) {
+  let rows = [];
+  try {
+    rows = db.prepare("SELECT value FROM cursorDiskKV WHERE key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all();
+  } catch {
+    return { tools: {}, conflicts: 0 };
+  }
+  const counts = new Map();
+  for (const r of rows) {
+    const data = Buffer.from(r.value);
+    if (!rc.looksLikePart('mcps', data)) continue;
+    const options = rc.decodePart('mcps', data).mcp_meta_tool_options;
+    for (const d of (options && options.mcp_descriptors) || []) {
+      for (const t of d.tools || []) {
+        if (typeof t.annotations_json !== 'string') continue;
+        const key = sources.annotationKey(d.server_identifier, t.tool_name);
+        const values = counts.get(key) || new Map();
+        values.set(t.annotations_json, (values.get(t.annotations_json) || 0) + 1);
+        counts.set(key, values);
+      }
+    }
+  }
+  const tools = Object.fromEntries([...counts].map(([key, values]) => [key, [...values].sort((a, b) => b[1] - a[1])[0][0]]));
+  return { tools, conflicts: [...counts.values()].filter((values) => values.size > 1).length };
+}
+
 function findPluginIds(db, plugin, key) {
   let rows = [];
   try {
@@ -95,6 +145,11 @@ function rebuild(folders, options, cache, db, dir) {
   try {
     const env = sources.environment(options);
     if (db) env.pluginIds = pluginIds(db, dir, sources.installedPlugins(env), Date.now());
+    if (db) {
+      const annotations = toolAnnotations(db, dir, Date.now());
+      env.toolAnnotations = annotations.annotations;
+      env.annotationConflicts = annotations.conflicts;
+    }
     const { parts, dynamic, notes } = sources.buildParts(folders, { env });
     result = { encoded: rc.encodeParts(parts), parts, dynamic, notes, at: Date.now() };
   } catch (err) {
@@ -152,6 +207,9 @@ function itemCount(kind, part) {
   if (kind === 'rules') return (part.rules || []).length;
   if (kind === 'skills') return (part.agent_skills || []).length;
   if (kind === 'subagents') return (part.custom_subagents || []).length;
+  // The tools the model is told about: the meta-tool list (every server's tools), else the inline ones.
+  const meta = part.mcp_meta_tool_options;
+  if (meta && meta.mcp_descriptors) return meta.mcp_descriptors.reduce((n, d) => n + (d.tools || []).length, 0);
   return (part.tools || []).length;
 }
 

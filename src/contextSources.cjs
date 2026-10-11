@@ -17,10 +17,13 @@
 //
 // Not reproducible from disk, so possibly different from what Cursor sent: plugin and marketplace
 // database ids (only Cursor's server knows them; the caller may pass ones found in parts Cursor
-// kept, see sentContext.cjs), the order of MCP servers (the order they connected in), team rules,
-// Agent Store skills, and anything that changed between the send and the rebuild. Nor the order of a
-// rule edited while Cursor ran: Cursor keeps its list and moves a changed rule to its end
-// (LocalCursorRulesService.reloadAtPath). Files .cursorignore excludes are not left out here.
+// kept, see sentContext.cjs), tool annotations (the caller may pass ones found the same way), the
+// order of MCP servers in the meta-tool descriptors (the order they connected in), team rules,
+// Agent Store skills, and anything that changed between the send and the rebuild. Nor the order of
+// rule files: ripgrep lists them with two threads, so its order differs from run to run (ripwalk
+// takes the most frequent order of a few runs). Nor the order of a rule edited while Cursor ran:
+// Cursor keeps its list and moves a changed rule to its end (LocalCursorRulesService.reloadAtPath).
+// Files .cursorignore excludes are not left out here.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -665,12 +668,25 @@ function entries(dir) {
   return out;
 }
 
+// Cursor's built-in servers whose tools go in the request in full (inline): Cursor's AU.rFE in
+// cursor-agent-exec's request context. With the meta-tool descriptors on (Cursor sends them with
+// every request, in all 72 captured runs), the other servers' tools are listed by name only, and
+// read from their definition files when the model asks for them.
+const INLINE_MCP_SERVERS = new Set(['cursor-dev-control', 'cursor-ide-browser']);
+
+// Tool annotations (readOnlyHint...) are not in the MCP folders: they come from the servers, and
+// Cursor keeps them only inside the meta-tool parts it stored (sentContext.cjs reads them).
+// env.toolAnnotations: Map of `${serverIdentifier}\n${toolName}` -> annotations_json, as sent.
+const annotationKey = (server, tool) => `${server}\n${tool}`;
+
 function mcpsPart(env, workspacePaths) {
   const dir = projectDir(env, workspacePaths);
   if (!dir) return { tools: [], mcp_instructions: [] };
   const mcps = path.join(dir, 'mcps');
   const pluginList = plugins(env);
-  const servers = entries(mcps).filter((n) => isDir(path.join(mcps, n))).map((n) => {
+  // The file-system descriptors list the servers and their tools in directory order, as the
+  // folders are read (checked against the wire: the folders' own order, for servers and tools).
+  const folders = entries(mcps).filter((n) => isDir(path.join(mcps, n))).map((n) => {
     const folder = path.join(mcps, n);
     let meta = {};
     try {
@@ -694,22 +710,27 @@ function mcpsPart(env, workspacePaths) {
     const plugin = /^plugin-/.test(n) ? pluginList.find((p) => n.startsWith(`plugin-${p.name}-`)) : undefined;
     return { folder, folderId: n, id: meta.serverIdentifier || n, name: meta.serverName || n, instructions, tools, plugin };
   });
-  // The order servers connected in is not on disk: Cursor's own servers first, by name, then plugins.
-  servers.sort((a, b) => (!!a.plugin - !!b.plugin) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // The order of the meta-tool descriptors and instructions is the order servers connected in, not on
+  // disk: Cursor's own servers first, by name, then plugins (the one order seen in the wire matches).
+  const servers = [...folders].sort((a, b) => (!!a.plugin - !!b.plugin) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const pluginFields = (s) => (s.plugin ? { plugin: s.plugin.name, marketplace: s.plugin.marketplace, plugin_db_id: s.plugin.id, marketplace_id: s.plugin.marketplaceId } : {});
+  const annotated = (s, t) => {
+    const a = env.toolAnnotations && env.toolAnnotations.get(annotationKey(s.id, t.name));
+    return a === undefined ? {} : { annotations_json: a };
+  };
   return {
-    tools: servers.flatMap((s) => s.tools.map((t) => ({
+    tools: servers.filter((s) => INLINE_MCP_SERVERS.has(s.id)).flatMap((s) => s.tools.map((t) => ({
       name: `${s.id}-${t.name}`, provider_identifier: s.name, tool_name: t.name, description: t.description,
       input_schema_json: t.arguments === undefined ? undefined : JSON.stringify(t.arguments),
     }))),
     mcp_instructions: servers.filter((s) => s.instructions).map((s) => ({ server_name: s.name, instructions: s.instructions, server_identifier: s.id })),
     mcp_file_system_options: {
       enabled: true, workspace_project_dir: dir,
-      mcp_descriptors: servers.map((s) => ({ server_identifier: s.folderId, server_name: s.name, ...pluginFields(s), folder_path: s.folder, server_use_instructions: s.instructions, tools: s.tools.map((t) => ({ tool_name: t.name, definition_path: t.file })) })),
+      mcp_descriptors: folders.map((s) => ({ server_identifier: s.folderId, server_name: s.name, ...pluginFields(s), folder_path: s.folder, server_use_instructions: s.instructions, tools: s.tools.map((t) => ({ tool_name: t.name, definition_path: t.file })) })),
     },
     mcp_meta_tool_options: {
       enabled: true,
-      mcp_descriptors: servers.map((s) => ({ server_identifier: s.id, server_name: s.name, ...pluginFields(s), server_use_instructions: s.instructions, tools: s.tools.map((t) => ({ tool_name: t.name })) })),
+      mcp_descriptors: servers.map((s) => ({ server_identifier: s.id, server_name: s.name, ...pluginFields(s), server_use_instructions: s.instructions, tools: s.tools.map((t) => ({ tool_name: t.name, ...annotated(s, t) })) })),
     },
   };
 }
@@ -747,8 +768,8 @@ function dynamicContext(env, workspacePaths) {
 // --- entry point ---------------------------------------------------------------------------
 
 // The environment the rebuild reads: Cursor's app (for ripgrep and gray-matter), the home folder.
-function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds } = {}) {
-  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, notes: [] };
+function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations } = {}) {
+  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, notes: [] };
   const rg = path.join(appDir, 'node_modules', '@vscode', 'ripgrep', 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (isFile(rg)) env.rg = rg;
   else env.notes.push('Cursor\'s ripgrep not found: rule files listed in sorted order, not Cursor\'s');
@@ -787,6 +808,8 @@ function buildParts(workspacePaths, options = {}) {
     notes.push(`environment not rebuilt: ${err.message}`);
   }
   if (plugins(env).some((p) => p.id === undefined || p.marketplaceId === undefined)) notes.push('plugin database ids unknown: plugin skills and MCP servers may differ from what Cursor sent');
+  if (!env.toolAnnotations) notes.push('MCP tool annotations not read (no Cursor database): MCP tools may differ from what Cursor sent');
+  else if (env.annotationConflicts) notes.push(`${env.annotationConflicts} MCP tools had different annotations in the parts Cursor kept (the servers changed them): the most frequent was taken, which may not be the one sent`);
   return { parts, dynamic, notes };
 }
 
@@ -835,4 +858,4 @@ function stripJsonComments(text) {
 // Installed plugins: [{ name, marketplace, rev }] (the keys of env.pluginIds are `${name}-${rev}`).
 const installedPlugins = (env) => plugins(env).map(({ name, marketplace, rev }) => ({ name, marketplace, rev }));
 
-module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments };
+module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey };

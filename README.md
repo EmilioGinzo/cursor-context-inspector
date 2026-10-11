@@ -238,16 +238,29 @@ same when the files have not changed; the panel shows them as **Sent with the
 request, rebuilt (not in the prompt)**. Only messages the recorder sees within 10 minutes
 are matched with a rebuild (older chats get none: the files may have changed).
 
+The MCP part follows what the request carries: the tools of Cursor's built-in
+browser and dev-control servers in full, and every other server's tools by name
+with their annotations (`readOnlyHint` and the like), plus each server's
+folder and tool files. Annotations are not in the snapshots; they are read from
+the copies Cursor kept of this part in its database (`context/tool-annotations.json`,
+rescanned hourly). A tool with several annotations there takes the most
+frequent, and a note says so.
+
 A rebuilt part is what Cursor sent only when their sha256 match.
 `cursor-context wire compare` checks that against captured traffic, part by
 part; `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
 under the same id. Things the rebuild cannot know: the order MCP servers
-connected in (Cursor's own servers are put first), team rules, Agent Store
-skills, and plugin database ids, which are taken from a part Cursor kept in its
-database when there is one (`context/plugin-ids.json`). Nor the order of a rule
+connected in (Cursor's own servers are put first in the tool descriptors), which
+servers were connected when the message was sent (a server that was not is
+listed without its tools), team rules,
+Agent Store skills, and plugin database ids, which are taken from a part Cursor
+kept in its database when there is one (`context/plugin-ids.json`). Nor the order of a rule
 edited while Cursor runs (Cursor moves it to the end of its list), or files
-`.cursorignore` excludes. When ripgrep's runs list rule files in different
-orders, the most frequent is taken and a note in `sentContext` says so.
+`.cursorignore` excludes. Ripgrep lists rule files with two threads, so the order
+of rules in a folder changes from one listing to the next: the most frequent of
+a few runs is taken, and a note in `sentContext` says so. The order Cursor sent
+is one of the orders ripgrep can produce, not necessarily the one taken, so the
+rules part's id may differ.
 
 Credentials are never stored. A git remote URL holds them as git has it
 (`https://user:token@host/...`), and a rule may hold a URL or a token

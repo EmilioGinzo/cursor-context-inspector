@@ -89,8 +89,9 @@ test('rebuilds rules, skills, subagents and MCP tools from their files, as Curso
     ['.cursor/agents/helper.md', 'helper', 'CUSTOM_SUBAGENT_PERMISSION_MODE_READONLY', 'You help.', 'user', 'inherit'],
   ]);
 
-  const tools = parts.mcps.tools.map((x) => [x.name, x.provider_identifier, x.input_schema_json]);
-  assert.deepStrictEqual(tools.sort(), [['srv-alpha', 'Server', undefined], ['srv-zeta', 'Server', '{"type":"object","properties":{}}']]);
+  // Only Cursor's built-in servers' tools go in the request in full; the others are listed by name (below).
+  assert.deepStrictEqual(parts.mcps.tools, []);
+  assert.deepStrictEqual(parts.mcps.mcp_meta_tool_options.mcp_descriptors.map((d) => d.tools.map((x) => x.tool_name).sort()), [['alpha', 'zeta']]);
   assert.deepStrictEqual(parts.mcps.mcp_instructions, [{ server_name: 'Server', instructions: 'Use the server well.', server_identifier: 'srv' }]);
   const [descriptor] = parts.mcps.mcp_file_system_options.mcp_descriptors;
   assert.deepStrictEqual([path.relative(home, descriptor.folder_path).split(path.sep).slice(0, 2), descriptor.server_use_instructions], [['.cursor', 'projects'], 'Use the server well.']);
@@ -160,8 +161,8 @@ test('the recorder keeps the context sent with each new user message, once, and 
   assert.deepStrictEqual(second.parts, first.parts, 'unchanged files: the same parts');
   assert.deepStrictEqual([first.storedByCursor, second.storedByCursor], [[], ['subagents']]);
   assert.strictEqual(first.parts.rules.items, 6);
-  // Stored once, by sha256, with a readable copy.
-  const files = fs.readdirSync(path.join(dir, 'context')).sort();
+  // Stored once, by sha256, with a readable copy (context/*.json are the caches: plugin ids, annotations).
+  const files = fs.readdirSync(path.join(dir, 'context')).filter((f) => !f.endsWith('.json')).sort();
   assert.deepStrictEqual(files, rc.PARTS.flatMap((k) => [`${first.parts[k].id}.bin`, `${first.parts[k].id}.md`]).sort());
   for (const k of rc.PARTS) {
     const data = fs.readFileSync(path.join(dir, 'context', `${first.parts[k].id}.bin`));
@@ -239,7 +240,69 @@ test('a subagent with no workspace of its own is rebuilt from its parent\'s fold
   assert.deepStrictEqual(sub.sentContext[0].parts, parent.sentContext[0].parts);
 });
 
-test('plugin database ids are taken from a part Cursor kept',{ skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+// Cursor's MCP servers as the request lists them: the built-in browser's tools in full, the other
+// servers by name only, with the annotations the servers gave (here: from env.toolAnnotations).
+test('MCP tools: built-in servers in full, the others by name with their annotations, in folder order', (t) => {
+  const root = tmp(t);
+  const home = path.join(root, 'home');
+  const ws = path.join(home, 'work', 'repo');
+  const slug = ws.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  const mcps = path.join(home, '.cursor', 'projects', slug, 'mcps');
+  write(path.join(mcps, 'srv', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'srv', serverName: 'Server' }));
+  write(path.join(mcps, 'srv', 'tools', 'zeta.json'), JSON.stringify({ name: 'zeta', description: 'Z.', arguments: { type: 'object', properties: {} } }));
+  write(path.join(mcps, 'srv', 'tools', 'alpha.json'), JSON.stringify({ name: 'alpha', description: 'A.', arguments: { type: 'object', properties: {} } }));
+  write(path.join(mcps, 'cursor-ide-browser', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'cursor-ide-browser', serverName: 'cursor-ide-browser' }));
+  write(path.join(mcps, 'cursor-ide-browser', 'tools', 'browse.json'), JSON.stringify({ name: 'browse', description: 'Browses.', arguments: { type: 'object' } }));
+  fs.mkdirSync(ws, { recursive: true });
+  const toolAnnotations = new Map([[sources.annotationKey('srv', 'alpha'), '{"readOnlyHint":true,"destructiveHint":false}']]);
+  const { parts } = sources.buildParts([ws], { home, appDir: path.join(root, 'no-app'), toolAnnotations });
+
+  assert.deepStrictEqual(parts.mcps.tools.map((x) => [x.name, x.provider_identifier, x.description, x.input_schema_json]), [
+    ['cursor-ide-browser-browse', 'cursor-ide-browser', 'Browses.', '{"type":"object"}'],
+  ]);
+  // Meta-tool descriptors: Cursor's own servers by name, names only, the annotations where known.
+  const meta = parts.mcps.mcp_meta_tool_options.mcp_descriptors;
+  assert.deepStrictEqual(meta.map((d) => d.server_identifier), ['srv', 'cursor-ide-browser']);
+  assert.deepStrictEqual(meta[0].tools.map((x) => x.tool_name).sort(), ['alpha', 'zeta']);
+  assert.deepStrictEqual(meta[0].tools.find((x) => x.tool_name === 'alpha'), { tool_name: 'alpha', annotations_json: '{"readOnlyHint":true,"destructiveHint":false}' });
+  assert.deepStrictEqual(meta[0].tools.find((x) => x.tool_name === 'zeta'), { tool_name: 'zeta' });
+  assert.deepStrictEqual(meta[1].tools, [{ tool_name: 'browse' }]);
+  // File-system descriptors: the folders in directory order, with the definition files and no annotations.
+  const order = [];
+  const h = fs.opendirSync(mcps);
+  for (let e = h.readSync(); e; e = h.readSync()) order.push(e.name);
+  h.closeSync();
+  assert.deepStrictEqual(parts.mcps.mcp_file_system_options.mcp_descriptors.map((d) => d.server_identifier), order);
+  const fsSrv = parts.mcps.mcp_file_system_options.mcp_descriptors.find((d) => d.server_identifier === 'srv');
+  assert.deepStrictEqual(fsSrv.tools.map((x) => Object.keys(x)), [['tool_name', 'definition_path'], ['tool_name', 'definition_path']]);
+  // Without the database the annotations are not known, and the note says so.
+  const bare = sources.buildParts([ws], { home, appDir: path.join(root, 'no-app') });
+  assert.ok(bare.notes.some((n) => /annotations not read/.test(n)));
+  assert.strictEqual(bare.parts.mcps.mcp_meta_tool_options.mcp_descriptors[0].tools[0].annotations_json, undefined);
+  // Every part encodes, with the annotations in the MCP tool descriptor's field.
+  assert.ok(rc.encodeParts(parts).mcps.data.includes(Buffer.from('{"readOnlyHint":true,"destructiveHint":false}')));
+});
+
+test('tool annotations are read from a meta-tool part Cursor kept, most frequent value first', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const kept = (value) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools: [{ tool_name: 'alpha', annotations_json: value }, { tool_name: 'zeta' }] }] } });
+  // Two parts say readOnlyHint, one says the opposite: the majority is kept.
+  put('agentKv:blob:a1', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a2', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a3', kept('{"readOnlyHint":false}'));
+  save('c', Date.now(), [{ role: 'user', content: 'plain question' }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const meta = rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors;
+  assert.deepStrictEqual(meta.find((d) => d.server_identifier === 'srv').tools.map((x) => [x.tool_name, x.annotations_json]).sort(), [['alpha', '{"readOnlyHint":true}'], ['zeta', undefined]]);
+  const known = JSON.parse(fs.readFileSync(path.join(dir, 'context', 'tool-annotations.json'), 'utf8'));
+  assert.deepStrictEqual(known.tools, { [sources.annotationKey('srv', 'alpha')]: '{"readOnlyHint":true}' });
+});
+
+test('plugin database ids are taken from a part Cursor kept', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
   const root = tmp(t);
   const { home, ws } = sourcesFixture(root);
   const rev = 'a'.repeat(40);

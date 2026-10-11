@@ -652,6 +652,24 @@ test('a tool result replaced in the prompt is recorded from the store, found by 
   assert.match(fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8'), /the old read/);
 });
 
+test('a replaced result joins the record where it was in the chat, not before the start', () => {
+  const { db, save, dir } = setup();
+  const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_4', args: {} }] };
+  const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_4', result: 'the old read' }] };
+  const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_4', result: 'the new read' }] };
+  const reply = { role: 'assistant', content: [{ type: 'text', text: 'Read it.' }] };
+  const turns = [[callStep('tool_read_4')]];
+  save(1000, [sys, first, call], { turns });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+  save(2000, [sys, first, call, newResult, reply], { turns });
+  history.recordUpdatedSince(db, dir, 0);
+  const chat = path.join(dir, 'chats', 'History chat');
+  const meta = JSON.parse(fs.readFileSync(path.join(chat, 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.seen, [sys, first, call, oldResult, newResult, reply].map(hashOf));
+  const transcript = fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8');
+  assert.ok(transcript.indexOf('the old read') < transcript.indexOf('the new read'));
+});
+
 test('the store is searched for replaced results only once a run has ended, and once per call', () => {
   const store = require('../src/cursorStore.cjs');
   const realScan = store.blobsNaming;

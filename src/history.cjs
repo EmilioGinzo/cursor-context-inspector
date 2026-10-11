@@ -240,13 +240,17 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     writeAtomic(blobFile, value);
     fetched.add(hash);
   }
-  // The messages that left the prompt, once their blobs are here: they join the record before the prompt's.
+  // The messages that left the prompt, once their blobs are here. Summarized ones are the chat's start:
+  // they go before the prompt's. A replaced result goes where its row puts it (see placeStored).
   const inPrompt = new Set(hashes);
+  const summarized = new Set(archived);
   const earlier = [...new Set([...archived, ...found.keys()])]
     .filter((h) => !inPrompt.has(h) && fs.existsSync(path.join(dir, 'blobs', `${h}.json`)));
   const remember = (meta) => {
     const seen = new Set(meta.seen);
-    for (const h of [...earlier, ...hashes]) if (!seen.has(h)) { meta.seen.push(h); seen.add(h); }
+    const fresh = (list) => [...new Set(list)].filter((h) => !seen.has(h));
+    for (const h of [...fresh(earlier.filter((x) => summarized.has(x))), ...hashes]) if (!seen.has(h)) { meta.seen.push(h); seen.add(h); }
+    placeStored(db, meta.seen, fresh(earlier.filter((x) => !summarized.has(x))));
   };
   // A subagent's messages carry the same context parts as the root's (the wire shows the same
   // blob ids). A message seen before its blob was written is new when the blob arrives.
@@ -355,6 +359,21 @@ function addToolCallId(meta, composer) {
   if (!id || (meta.toolCallIds || []).includes(id)) return false;
   meta.toolCallIds = [...(meta.toolCallIds || []), id];
   return true;
+}
+
+// Adds messages stored outside the prompt to the record `list` where their rows put them: before the
+// first recorded message stored after them. Rows are in storage order, and storage is the chat's order.
+function placeStored(db, list, hashes) {
+  const rows = new Map();
+  const rowOf = (h) => {
+    if (!rows.has(h)) rows.set(h, store.rowidOf(db, `agentKv:blob:${h}`));
+    return rows.get(h);
+  };
+  for (const h of hashes) {
+    const row = rowOf(h);
+    const at = row === undefined ? -1 : list.findIndex((x) => { const r = rowOf(x); return r !== undefined && r > row; });
+    if (at === -1) list.push(h); else list.splice(at, 0, h);
+  }
 }
 
 // A tool result Cursor replaced in the prompt: the prompt of the model call that followed it still held

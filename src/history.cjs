@@ -225,7 +225,9 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const texts = pending.length ? recordedTexts(db, dir, [...hashes, ...archived, ...(previous.seen || [])]) : new Set();
   const matched = pending.filter((r) => texts.has(r.text.trim()));
   const missing = pending.filter((r) => !texts.has(r.text.trim()));
-  const scanNow = (unscanned.length > 0 || missing.length > 0) && options.scanCalls !== false && !(composer.generatingBubbleIds || []).length;
+  // Not while a run writes the chat (the same test as unsettled()): its results and replies may still change.
+  const writing = composer.status === 'generating' || (composer.generatingBubbleIds || []).length > 0;
+  const scanNow = (unscanned.length > 0 || missing.length > 0) && options.scanCalls !== false && !writing;
   const replyMarks = (scanNow ? pending : matched).map((r) => r.bubble);
   const found = new Map();
   if (scanNow) {

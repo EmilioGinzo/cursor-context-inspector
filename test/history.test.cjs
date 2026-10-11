@@ -700,6 +700,30 @@ test('the store is searched for replaced results only once a run has ended, and 
     store.blobsNaming = realScan;
   }
 });
+test('the store is not searched while the chat is marked generating, before any bubble is', () => {
+  const store = require('../src/cursorStore.cjs');
+  const realScan = store.blobsNaming;
+  let scans = 0;
+  store.blobsNaming = (...args) => { scans++; return realScan(...args); };
+  try {
+    const { db, save, dir } = setup();
+    const call = { role: 'assistant', content: [{ type: 'tool-call', toolName: 'Read', toolCallId: 'tool_read_5', args: {} }] };
+    const oldResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'first read' }] };
+    const newResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'tool_read_5', result: 'second read' }] };
+    const turns = [[callStep('tool_read_5')]];
+    save(1000, [sys, first, call], { turns, status: 'generating' });
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(oldResult)}`, Buffer.from(JSON.stringify(oldResult)));
+    save(1500, [sys, first, call, newResult], { turns, status: 'generating' });
+    history.recordUpdatedSince(db, dir, 0);
+    assert.strictEqual(scans, 0);
+    save(2000, [sys, first, call, newResult], { turns });
+    history.recordUpdatedSince(db, dir, 1000);
+    assert.strictEqual(scans, 1);
+  } finally {
+    store.blobsNaming = realScan;
+  }
+});
+
 test('a reply interrupted by the next prompt is recorded from the store, where it was in the chat', () => {
   const store = require('../src/cursorStore.cjs');
   const realScan = store.blobsNaming;

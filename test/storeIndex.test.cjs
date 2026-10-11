@@ -93,3 +93,85 @@ test('rows renumbered or removed under the watermark are read again', () => {
   assert.strictEqual(index.watermark(), db.prepare('SELECT max(rowid) AS m FROM cursorDiskKV').get().m);
   assert.strictEqual(index.callHashes('tool_b').length, 1, 'entries already there are kept once');
 });
+
+// The conversation state of a chat whose prompt is this one message (field 1: its blob hash).
+const stateOf = (message) => {
+  const digest = crypto.createHash('sha256').update(JSON.stringify(message)).digest();
+  return `~${Buffer.concat([Buffer.from([0x0a, 0x20]), digest]).toString('base64')}`;
+};
+const composerOf = (name, lastUpdatedAt, message) => JSON.stringify({
+  name, lastUpdatedAt, conversationState: stateOf(message), promptTokenBreakdown: { totalUsedTokens: 1, maxTokens: 10, categories: [] },
+});
+
+test('a tick records nothing until the store is read, then records every chat', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  fill(db, 600);
+  for (const id of ['a', 'b']) db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`composerData:${id}`, composerOf(`chat ${id}`, 500, message));
+  const budget = { index: 0, record: Infinity };
+  const clock = stepClock();
+  // 600 filler rows are three steps of 256: the store is read over three ticks, and nothing is recorded before.
+  const first = history.tick(db, dir, { clock, budgetMs: budget });
+  assert.strictEqual(first.storeIndexed, false);
+  assert.strictEqual(first.recorded, 0);
+  assert.strictEqual(history.tick(db, dir, { clock, budgetMs: budget }).storeIndexed, false);
+  const third = history.tick(db, dir, { clock, budgetMs: budget });
+  assert.strictEqual(third.storeIndexed, true);
+  assert.strictEqual(third.recorded, 2);
+  assert.ok(fs.existsSync(path.join(dir, 'chats', 'chat a')));
+});
+
+test('a record stops at its deadline, after the chats that share its time, and resumes with the next', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  for (const id of ['a', 'b', 'c']) db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`composerData:${id}`, composerOf(`chat ${id}`, 100, message));
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:d', composerOf('chat d', 200, message));
+  const index = storeIndex.open(dir);
+  index.advance(db);
+  // The clock moves one ms per call and the deadline is 2: after a, the deadline has passed, but b and c
+  // share a's time, so they are recorded too; d is left for the next call.
+  const first = history.recordUpdatedSince(db, dir, 0, { clock: stepClock(), deadline: 2, index });
+  assert.strictEqual(first.stopped, true);
+  assert.strictEqual(first.more, true);
+  assert.strictEqual(first.recorded, 3);
+  assert.strictEqual(first.watermark, 100);
+  const second = history.recordUpdatedSince(db, dir, first.watermark, { clock: () => 0, index });
+  assert.strictEqual(second.recorded, 1);
+  assert.strictEqual(second.more, false);
+  const all = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).map((c) => c.composerId).sort();
+  assert.deepStrictEqual(all, ['a', 'b', 'c', 'd']);
+});
+
+test('a record always records at least one chat, even past its deadline', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', composerOf('chat a', 100, message));
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:b', composerOf('chat b', 200, message));
+  const result = history.recordUpdatedSince(db, dir, 0, { clock: () => 10, deadline: 0 });
+  assert.strictEqual(result.recorded, 1);
+  assert.strictEqual(result.watermark, 100);
+});
+
+test('a chat another connection writes is recorded, though the chat list was read before', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-shared-'));
+  const file = path.join(dir, 'state.vscdb');
+  const writer = new DatabaseSync(file);
+  writer.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
+  const message = { role: 'user', content: 'hi' };
+  writer.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(message)}`, Buffer.from(JSON.stringify(message)));
+  writer.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', composerOf('chat a', 100, message));
+  const reader = new DatabaseSync(file, { readOnly: true });
+  const historyDir = path.join(dir, 'history');
+  history.recordUpdatedSince(reader, historyDir, 0);
+  // Cursor's connection writes a chat later: the reader's list is stale unless the change is seen.
+  writer.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:b', composerOf('chat b', 300, message));
+  const next = history.recordUpdatedSince(reader, historyDir, 200);
+  assert.strictEqual(next.recorded, 1);
+  const all = JSON.parse(fs.readFileSync(path.join(historyDir, 'index.json'), 'utf8')).map((c) => c.composerId).sort();
+  assert.deepStrictEqual(all, ['a', 'b']);
+  reader.close();
+  writer.close();
+});

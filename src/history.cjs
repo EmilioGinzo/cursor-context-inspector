@@ -752,31 +752,54 @@ function unsettled(db, dir, composerId) {
   return store.rootMessageHashes(composer.conversationState).some((h) => !fs.existsSync(path.join(dir, 'blobs', `${h}.json`)));
 }
 
-// Record chats changed after `since` and up to `until` (ms), oldest first, at most
-// `limit` of them. Returns { recorded, watermark, more, unsettled } (unsettled: { id: changedAt }).
-function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent, clock } = {}) {
-  const rows = db.prepare(`
+// The chats with a conversation, oldest change first: [{ id, t }]. Reads every chat's state (tens of
+// MB), so the list is kept while the store is unchanged: PRAGMA data_version moves when another
+// connection (Cursor's) commits, and the newest rowid when this one inserts.
+const chatLists = new WeakMap();
+function chatsOf(db) {
+  const version = `${db.prepare('PRAGMA data_version').get().data_version}:${store.maxRowid(db)}`;
+  const cached = chatLists.get(db);
+  if (cached && cached.version === version) return cached.chats;
+  const chats = listChats(db);
+  chatLists.set(db, { version, chats });
+  return chats;
+}
+
+function listChats(db) {
+  return db.prepare(`
     SELECT id, t FROM (
       SELECT substr(key, 14) AS id, ${CHANGED_AT} AS t
       FROM cursorDiskKV
-      WHERE key LIKE 'composerData:%' AND json_extract(value, '$.conversationState') IS NOT NULL)
-    WHERE t > ? AND t <= ?
-    ORDER BY t LIMIT ?`).all(since, until, limit);
+      WHERE key >= 'composerData:' AND key < 'composerData;' AND json_extract(value, '$.conversationState') IS NOT NULL)
+    ORDER BY t`).all();
+}
+
+// Record chats changed after `since` and up to `until` (ms), oldest first, at most `limit` of them. At
+// least one is recorded per call; after `deadline` (ms, by clock) none more, except the ones that share
+// the last one's time, so that `watermark` (the last one's time) leaves none out. Returns { recorded,
+// watermark, more, unsettled } (unsettled: { id: changedAt }).
+function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent, clock = Date.now, deadline = Infinity, index, chats, saveIndex = true } = {}) {
+  const all = (chats || chatsOf(db)).filter((r) => r.t > since && r.t <= until);
+  const rows = limit >= 0 ? all.slice(0, limit) : all;
   let recorded = 0;
   let watermark = since;
+  let stopped = false;
+  let done = 0;
   const pending = {};
   for (const r of rows) {
+    if (done > 0 && clock() >= deadline && r.t !== watermark) { stopped = true; break; }
     // One unreadable chat must not stop the others (or the backfill) for good.
     try {
-      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent, clock });
+      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent, clock, index });
       if (unsettled(db, dir, r.id)) pending[r.id] = r.t;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${r.id}:`, err);
     }
     watermark = Math.max(watermark, r.t);
+    done++;
   }
-  if (recorded) writeIndex(dir);
-  return { recorded, watermark, more: limit >= 0 && rows.length === limit, unsettled: pending };
+  if (recorded && saveIndex) writeIndex(dir);
+  return { recorded, watermark, more: stopped || (limit >= 0 && rows.length === limit), stopped, unsettled: pending };
 }
 
 // Records the chats left unsettled by earlier ticks again. `pending` maps each to when
@@ -784,18 +807,19 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
 // A chat stuck unsettled (e.g. a blob Cursor never wrote) is given up after
 // `PENDING_MS`; its later changes still reach the recorder by timestamp.
 const PENDING_MS = 86400000;
-function recordPending(db, dir, pending, now, sent, clock) {
+function recordPending(db, dir, pending, now, sent, clock, { deadline = Infinity, index, saveIndex = true } = {}) {
   let recorded = 0;
   const still = {};
   for (const [id, since] of Object.entries(pending)) {
+    if (clock() >= deadline) { still[id] = since; continue; }
     try {
-      recorded += recordChat(db, id, dir, undefined, { sentContext: sent, clock });
+      recorded += recordChat(db, id, dir, undefined, { sentContext: sent, clock, index });
       if (now - since < PENDING_MS && unsettled(db, dir, id)) still[id] = since;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${id}:`, err);
     }
   }
-  if (recorded) writeIndex(dir);
+  if (recorded && saveIndex) writeIndex(dir);
   return { recorded, pending: still };
 }
 
@@ -821,12 +845,19 @@ const LAYOUT = 3;
 // 1: chats whose run ended after the watermark had passed their send time.
 const RESCAN = 1;
 
-// Called periodically. Records chats updated since the last tick, then catches up
-// on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
-// Returns `backfilling` while older chats remain.
+// Work per tick, in ms (by clock): reading the store's rows, then recording chats. A tick is held to these
+// (the chat being recorded when the time runs out is finished, so a tick can run a little over).
+const BUDGET_MS = { index: 120, record: 60 };
+const INDEX_MS = 30000;
+const indexWrittenAt = new Map();
+
+// Called periodically. Reads the store in steps (storeIndex), then records chats updated since the last
+// tick, and catches up on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
+// Each step stops at its time budget and resumes on the next tick. Nothing is recorded until the store's
+// rows are all read, so the lookups see them. Returns `backfilling` while older chats remain.
 // sentContext: options for sentContext.record ({ enabled, appDir }); rebuilt once per tick.
-// clock: the time now (Date.now).
-function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now } = {}) {
+// clock: the time now (Date.now). budgetMs: { index, record } (BUDGET_MS).
+function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
   const now = clock();
@@ -834,30 +865,48 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   // Before 0.10 the first run went back only 7 days and never further.
   if (!state.backfill || state.rescan !== RESCAN) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
   const rescan = state.rescan !== RESCAN;
-  // Every tick: windows still running an older version may write id-named or flat folders.
-  const migrated = migrateLayout(db, dir);
-  const relayout = migrated || state.layout !== LAYOUT;
-  if (relayout) rebuildTranscripts(db, dir);
+  const index = storeIndex.open(dir);
+  const indexed = index.advance(db, { budgetMs: budgetMs.index, clock });
   const before = JSON.stringify([state.backfill, state.pending || {}]);
-  const sentOptions = sent && { ...sent, cache: new Map() };
-  const again = recordPending(db, dir, state.pending || {}, now, sentOptions, clock);
-  const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock });
-  let recorded = again.recorded + result.recorded;
-  const pending = { ...again.pending };
-  for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
-  if (!state.backfill.done) {
-    const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock });
-    recorded += older.recorded;
-    // Only recent chats wait to settle: an old one stuck unsettled would be retried for nothing.
-    for (const [id, t] of Object.entries(older.unsettled)) if (now - t < PENDING_MS) pending[id] = pending[id] || now;
-    // One ms back: chats sharing the batch's last timestamp may not all be in it.
-    state.backfill = older.more ? { ...state.backfill, from: older.watermark - 1 } : { done: true };
+  let recorded = 0;
+  let migrated = false;
+  let pending = { ...(state.pending || {}) };
+  let watermark = state.watermark;
+  const backfilling = !state.backfill.done;
+  if (indexed.caughtUp) {
+    // The chat list is read before the deadline is set: its read is not part of the chats' budget.
+    const chats = chatsOf(db);
+    const deadline = clock() + budgetMs.record;
+    // Every tick: windows still running an older version may write id-named or flat folders.
+    migrated = migrateLayout(db, dir);
+    const relayout = migrated || state.layout !== LAYOUT;
+    if (relayout) rebuildTranscripts(db, dir);
+    const sentOptions = sent && { ...sent, cache: new Map() };
+    const again = recordPending(db, dir, pending, now, sentOptions, clock, { deadline, index, saveIndex: false });
+    const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false });
+    watermark = result.watermark;
+    recorded = again.recorded + result.recorded;
+    pending = { ...again.pending };
+    for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
+    if (!state.backfill.done) {
+      const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false });
+      recorded += older.recorded;
+      // Only recent chats wait to settle: an old one stuck unsettled would be retried for nothing.
+      for (const [id, t] of Object.entries(older.unsettled)) if (now - t < PENDING_MS) pending[id] = pending[id] || now;
+      // One ms back: chats sharing the batch's last timestamp may not all be in it. A stop at the deadline
+      // leaves none out (recordUpdatedSince), so it resumes at the watermark itself.
+      state.backfill = older.more ? { ...state.backfill, from: older.stopped ? older.watermark : older.watermark - 1 } : { done: true };
+    }
+    // index.json is written every INDEX_MS while chats are recorded (it reads every chat's meta), and when
+    // the backfill ends.
+    const ended = backfilling && !!state.backfill.done;
+    const due = !indexWrittenAt.has(dir) || now - indexWrittenAt.get(dir) >= INDEX_MS;
+    if (relayout || ended || (recorded > 0 && due)) { writeIndex(dir); indexWrittenAt.set(dir, now); }
   }
-  if (relayout && !recorded) writeIndex(dir);
-  if (relayout || rescan || result.watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
-    writeAtomic(stateFile, JSON.stringify({ watermark: result.watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
+  if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
+    writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark: result.watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: indexed.caughtUp };
 }
 
 module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

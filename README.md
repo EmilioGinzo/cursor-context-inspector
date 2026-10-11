@@ -146,7 +146,14 @@ All settings are under **Settings → Extensions → Agent Context Inspector**.
 Every 30 s, if Cursor wrote anything, one Cursor window snapshots the chats
 that changed into `~/.cursor-context-history`. A chat whose agent is still
 running is checked again on every write until its run ends, so the record
-holds its final state even when Cursor stores it without a newer timestamp:
+holds its final state even when Cursor stores it without a newer timestamp.
+
+Each step of the recorder has a time budget, so the editor is not held for
+long: a tick reads at most about 120 ms of Cursor's store (see
+`.store-index.sqlite` below) and records chats for about 60 ms, finishing
+the chat it has started (a chat with a large history can take longer than
+that). Whatever is left waits for the next tick. Nothing is recorded until the
+store has been read up to date, so the lookups below see every message.
 
 | Path | Contents |
 | --- | --- |
@@ -161,7 +168,7 @@ holds its final state even when Cursor stores it without a newer timestamp:
 | `blobs/<sha256>.json` | Each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading). |
 | `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. `<sha256>.redacted.bin` when it held credentials, replaced (see [Context sent beside the prompt](#context-sent-beside-the-prompt)). |
 | `context/<sha256>.md` | The same part, readable: one collapsed section per rule, skill, subagent or tool. |
-| `index.json` | All recorded chats, newest first, each with its subagent tree. |
+| `index.json` | All recorded chats, newest first, each with its subagent tree. Written at most every 30 s while older chats are recorded, and when that ends. |
 | `.store-index.sqlite` | An index of the message blobs in Cursor's store by the tool call ids they hold and the digests of their assistant texts, so a lookup of a replaced result or an interrupted reply is a query, not a read of the store. Built once, in steps, from every row of the store (about 8 s of work over a few minutes of ticks for a store of this size); it only gains entries, and rows Cursor renumbers are read again. A cache: deleting it costs a new read, not a record. |
 
 - **Folder names** follow the chat name, with characters that are not valid
@@ -170,8 +177,10 @@ holds its final state even when Cursor stores it without a newer timestamp:
   `Ping request (a9ed13b2)`. A folder is renamed when its chat is renamed.
   Folders written by earlier versions (named by id, or subagents at the top
   level) are renamed and moved automatically.
-- **Older chats** are caught up in the background, 50 every 5 s (a few
-  minutes for a couple of thousand chats). Chats opened but never sent are
+- **Older chats** are caught up in the background, 50 every 5 s, a step at a
+  time: a tick stops recording when its time budget is spent and the rest
+  waits for the next one (a few minutes for a couple of thousand chats, more
+  for the largest histories). Chats opened but never sent are
   skipped. Expect the full history to take a few GB if you have thousands of
   chats; set `historyBackfillDays` to limit it.
 - **Commands:** **Record History of All Chats** records everything at once;

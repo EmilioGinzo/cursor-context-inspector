@@ -3,8 +3,19 @@
 
 // CLI: print the context breakdown of a Cursor chat, or the text of one item.
 //   cursor-context [--list] [--chat <id>] [--show <categoryId|itemId>] [--db <path>]
+// and inspect captured client<->server traffic (see src/wire/cli.cjs):
+//   cursor-context wire ls [--day YYYY-MM-DD] [--grep text]
+//   cursor-context wire show <flow dir or name> [--raw] [--json] [--clip N] [--schema file.json]
 
 const args = process.argv.slice(2);
+
+if (args[0] === 'wire') {
+  require('../src/wire/cli.cjs').run(args.slice(1)).then(
+    (code) => { process.exitCode = code; },
+    (e) => { console.error(e.message); process.exitCode = 1; },
+  );
+  return;
+}
 
 const store = require('../src/cursorStore.cjs');
 const opt = (name) => {

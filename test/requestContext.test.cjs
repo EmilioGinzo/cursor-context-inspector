@@ -29,3 +29,23 @@ test('parts encode the way protobuf-es writes them: by field number, proto3 defa
   assert.ok(!rc.looksLikePart('rules', Buffer.from('{"role":"user"}')));
 });
 
+test('the part field tables match the installed Cursor', (t) => {
+  let full;
+  try {
+    full = require('../src/wire/schema.cjs').loadSchema();
+  } catch {
+    return t.skip('Cursor is not installed');
+  }
+  for (const [type, m] of Object.entries(rc.SCHEMA.messages)) {
+    const theirs = full.messages[type];
+    assert.ok(theirs, `${type} in Cursor's schema`);
+    for (const f of m.fields) {
+      const c = theirs.fields.find((x) => x.no === f.no);
+      assert.ok(c, `${type}.${f.name} (${f.no})`);
+      assert.deepStrictEqual([c.name, c.kind, c.T, !!c.repeated, !!c.opt], [f.name, f.kind, f.T, f.repeated, f.opt], `${type}.${f.name}`);
+    }
+    // Every field Cursor writes besides input_schema (a Value; Cursor sends input_schema_json).
+    const missing = theirs.fields.filter((c) => !m.fields.some((f) => f.no === c.no) && c.name !== 'input_schema');
+    assert.deepStrictEqual(missing.map((c) => c.name), [], type);
+  }
+});

@@ -5,7 +5,7 @@
 // AgentSkillsCursorRulesService, subagents services and MCP file-system snapshots, then the
 // workbench's WorkbenchRequestContextExecutor). Cursor does not store what it sent, so this is the
 // only local way to get it; whether the result is byte-exact can only be told by its sha256 (the
-// ids the client sends, or a copy Cursor kept in agentKv).
+// ids the client sends, seen with `cursor-context wire compare`, or a copy Cursor kept in agentKv).
 //
 // It reads what Cursor reads: rules (.cursor/rules/**/*.mdc of each workspace folder and its
 // ancestors, AGENTS.md / CLAUDE.md / CLAUDE.local.md, .cursorrules, nested ones in git repos),

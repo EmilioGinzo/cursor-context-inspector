@@ -27,6 +27,7 @@ sent anywhere.
 - [Session history](#session-history)
 - [Where the data comes from](#where-the-data-comes-from)
 - [CLI](#cli)
+- [Recording Cursor's wire traffic](#recording-cursors-wire-traffic)
 - [Limitations](#limitations)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -256,7 +257,8 @@ rescanned hourly). Servers change them, so a tool can have several values there:
 stored last is used, a note says so, and every value is kept in that file.
 
 A rebuilt part is what Cursor sent only when their sha256 match.
-`storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
+`cursor-context wire compare` checks that against captured traffic, part by
+part; `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
 under the same id. Things the rebuild cannot know: the order MCP servers
 connected in (Cursor's own servers are put first in the tool descriptors), which
 servers were connected when the message was sent (a server that was not is
@@ -278,7 +280,8 @@ snapshots, `chat.md` and the parts. A part that held one is stored as
 `context/<sha256>.redacted.bin`: its name keeps the sha256 of the bytes before
 the replacement, the id compared with Cursor's, and `redacted` in its
 `sentContext` entry says how many were replaced and where (`dynamicRedacted`
-for the environment).
+for the environment). `wire compare` then reports the part as *= recorded
+except redacted credentials*.
 
 ## CLI
 
@@ -300,6 +303,88 @@ Ping request  [9f37163b-346e-42d7-8f95-622e23613f9b]  model=composer-2.5  tree=f
   ...
 ```
 
+## Recording Cursor's wire traffic
+
+To check that the recorded history matches what Cursor really sends to its
+servers, `tools/cursor-wire` runs a local [mitmproxy](https://mitmproxy.org/)
+that records every request and response between Cursor and the network. This is
+a development tool: it is not part of the extension and not in the `.vsix`.
+
+One-time setup (Linux; needs `uv` and `certutil` from nss):
+
+```sh
+uv tool install mitmproxy
+tools/cursor-wire ca install   # trust mitmproxy's CA in ~/.pki/nssdb, which Cursor uses
+```
+
+Each session:
+
+```sh
+tools/cursor-wire start        # proxy on 127.0.0.1:8080 (--port N for another)
+tools/cursor-wire launch       # start Cursor through it; Cursor must not already be running
+tools/cursor-wire status
+tools/cursor-wire check        # flags Cursor processes that reach :443 directly
+tools/cursor-wire stop         # stops only the proxy this script started
+```
+
+Chromium follows `--proxy-server`, but Cursor's Node children, among them the
+agent worker (`cursor-agent ... worker start`, which carries the agent chats),
+do not. So `launch` also sets `HTTPS_PROXY`/`HTTP_PROXY` (and lowercase),
+`NODE_USE_ENV_PROXY=1` (Node 24+'s built-in support for those variables) and
+`NO_PROXY=localhost,127.0.0.1,::1` for Cursor and everything it starts. The
+worker runs with `--use-system-ca`, so Node reads the system store too, and
+`NODE_EXTRA_CA_CERTS` adds mitmproxy's CA. Cursor's MCP process, which talks to
+remote MCP servers such as Atlassian's, ignores `NODE_EXTRA_CA_CERTS` and
+trusts only the certificates Cursor's main process loads. Without the CA there,
+every remote MCP server fails with `fetch failed` and its sign-in never starts.
+So `launch` also writes `~/.cursor-wire/ca-bundle.pem` (the system bundle plus
+mitmproxy's CA) and points `SSL_CERT_FILE` at it, which Node's system store
+follows. Tools the agent runs, such as curl and git, then trust the proxy too.
+Whether the worker's bundled
+runtime honours `NODE_USE_ENV_PROXY` is still unverified: after launching, run
+`tools/cursor-wire check`. It lists Cursor's processes by pid and executable
+name only (their command lines hold API keys), and fails if any of them has a
+connection to a remote port 443 that does not go through the proxy.
+
+`launch` only uses the proxy `start` recorded, or `--port N` if you started
+mitmdump yourself; either way it checks that the listener is a mitmdump running
+`cursor-wire.py` (`--any-proxy` skips that). `tools/cursor-wire env` prints the
+launch command, if you prefer to start Cursor yourself.
+
+Captures go to `~/.cursor-wire/<day>/`, one folder per request, with
+`meta.json` (method, URL, headers, status, trailers such as `grpc-status`,
+timings), `request.bin.gz` and `response.bin.gz` (the exact body bytes, streamed
+as they pass), plus one line per request in `flows.jsonl`. Nothing is capped or
+dropped. Authorization, cookie and API key headers, and secret-looking query
+parameters, are redacted in `meta.json`, but the bodies are kept whole: they
+hold your prompts, code and login tokens, so treat the folder like the chats
+themselves. `cursor-context wire ls|show` decodes them.
+
+Agent chats travel as `agent.v1.AgentService/Run` streams. The client does not
+send the conversation as text: it sends the chat's state as sha256 blob ids
+(the same ids as Cursor's `agentKv:blob:<id>` and the history's `blobs/`), and
+the server fetches the blobs it lacks over the same stream, stores new ones on
+the client, and sends checkpoints of the new state. `cursor-context wire conv`
+rebuilds each conversation from those flows (every client and server message,
+blobs from both sides, streamed text and thinking joined exactly);
+`cursor-context wire compare [<chat name or id prefix>]` checks it against what
+the plugin recorded, run by run, and rates the plugin's assumptions; context
+parts sent by id are compared with the recorded ones by sha256, and item by
+item where they differ (`--record-now` rebuilds them from the files as they
+are now). Both clip long texts in their human view (`--clip N`, `--full` shows
+all); `--json` keeps every byte. `compare` reads `~/.cursor-context-history` (`--history`) and
+Cursor's DB read-only (`--db`, or `--no-db`).
+
+Decoding needs Cursor's protobuf schema, which `bin/cursor-wire-schema.cjs`
+extracts from the installed bundles (`--app <dir>` if Cursor is not in
+`/usr/share/cursor/resources/app`). It prints a summary, `--out <file|->` writes
+the JSON, and it is cached per Cursor version in `~/.cursor-wire/schema/`
+(`--fresh` re-extracts).
+
+To undo: `tools/cursor-wire stop`, `tools/cursor-wire ca remove`, then
+`uv tool uninstall mitmproxy` (and delete `~/.mitmproxy` and `~/.cursor-wire`
+if you no longer want the CA or the captures).
+
 ## Limitations
 
 - **Built-in tool definitions are not stored locally.** Cursor's backend
@@ -308,7 +393,7 @@ Ping request  [9f37163b-346e-42d7-8f95-622e23613f9b]  model=composer-2.5  tree=f
   [Context sent beside the prompt](#context-sent-beside-the-prompt)).
 - **The context sent beside the prompt is rebuilt, not captured.** It matches
   what Cursor sent when the rule, skill, agent and MCP files did not change in
-  between.
+  between; `wire compare` tells.
 - The extension reads undocumented Cursor storage. A Cursor update can change
   it; open an issue if a category comes up empty.
 - The history folder contains everything your chats contain, including any
@@ -324,12 +409,15 @@ src/storeIndex.cjs    the index of Cursor's message blobs (replaced results, rep
 src/chatMarkdown.cjs  renders chat.md
 src/turnSteps.cjs     reads Cursor's turn steps and places their thinking on prompt messages
 src/requestContext.cjs  the context parts' wire format (encode, decode)
-src/protobuf.cjs      protobuf decoding, with and without a schema
 src/contextSources.cjs  rebuilds them from rule, skill, agent and MCP files
 src/sentContext.cjs   records them in the history, renders them
 src/redact.cjs        replaces credentials before anything is stored
 media/inspector.html  the webview UI
 bin/cursor-context.cjs  CLI
+src/wire/schema.cjs   extracts Cursor's protobuf schema from its JS bundles
+src/wire/conversation.cjs  agent conversations rebuilt from captured flows
+src/wire/compare.cjs  compares them with the recorded history
+tools/cursor-wire     wire-traffic recorder (mitmproxy add-on cursor-wire.py)
 test/                 node:test suites (npm test)
 ```
 

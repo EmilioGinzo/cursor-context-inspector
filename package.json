@@ -19,7 +19,8 @@
   ],
   "main": "./src/extension.cjs",
   "bin": {
-    "cursor-context": "./bin/cursor-context.cjs"
+    "cursor-context": "./bin/cursor-context.cjs",
+    "cursor-wire-schema": "./bin/cursor-wire-schema.cjs"
   },
   "activationEvents": [
     "onStartupFinished"

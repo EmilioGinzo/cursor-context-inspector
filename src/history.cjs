@@ -607,7 +607,8 @@ function writeTranscript(db, dir, chatDir, meta, currentHashes, detail) {
     return { ...s, toolCallIds, folder };
   });
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
-  const thinking = readJson(path.join(chatDir, 'thinking.json'), []);
+  // Below 'standard' chat.md has no thinking, not even a thinking.json a higher level left.
+  const thinking = keeps(detail, 'standard') ? readJson(path.join(chatDir, 'thinking.json'), []) : [];
   if (keeps(detail, 'standard')) writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
   const sentWith = new Map((meta.sentContext || []).flatMap((e) => e.messages.map((h) => [h, e])));
   writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, recorded.map((m) => m.message), {

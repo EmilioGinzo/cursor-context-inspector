@@ -908,3 +908,43 @@ test('a tick below full does not read the store into its index, and records at o
   assert.strictEqual(result.recorded, 1);
   assert.ok(!fs.existsSync(path.join(dir, require('../src/storeIndex.cjs').FILE)));
 });
+
+test('below standard chat.md has no thinking, even one a higher level recorded, and a late blob rewrites chat.md only', () => {
+  const { db, dir, save, prompt } = detailedChat();
+  const chat = path.join(dir, 'chats', 'History chat');
+  history.recordUpdatedSince(db, dir, 0);
+  const thinking = fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8');
+  const transcript = fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8');
+  const snapshots = fs.readdirSync(path.join(chat, 'snapshots')).sort();
+  // The next prompt arrives before its blob is stored.
+  const third = { role: 'user', content: 'third question' };
+  save(3000, [...prompt, third], { archive: [first, answer], turns: [[step.thinking('The bug is in a.js.'), callStep('t1')]] });
+  db.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`agentKv:blob:${hashOf(third)}`);
+  history.recordUpdatedSince(db, dir, 2000, { detail: 'conversation' });
+  assert.doesNotMatch(fs.readFileSync(path.join(chat, 'chat.md'), 'utf8'), /The bug is in a\.js\./);
+  // The unchanged chat gets the blob: chat.md is written again, and nothing a higher level keeps.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(third)}`, Buffer.from(JSON.stringify(third)));
+  history.recordChat(db, 'chat-1', dir, undefined, { detail: 'conversation' });
+  const md = fs.readFileSync(path.join(chat, 'chat.md'), 'utf8');
+  assert.match(md, /third question/);
+  assert.doesNotMatch(md, /The bug is in a\.js\./);
+  assert.strictEqual(fs.readFileSync(path.join(chat, 'thinking.json'), 'utf8'), thinking);
+  assert.strictEqual(fs.readFileSync(path.join(chat, 'transcript.md'), 'utf8'), transcript);
+  assert.deepStrictEqual(fs.readdirSync(path.join(chat, 'snapshots')).sort(), snapshots);
+});
+
+test('a lookup still waiting at full is dropped below full, so the chat settles; full looks it up again', () => {
+  const { db, save, dir } = setup();
+  const clock = () => 5000;
+  save(1000, [sys, first]);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-3', JSON.stringify({ type: 2, text: 'Never stored.' }));
+  const meta = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8'));
+  assert.strictEqual(history.tick(db, dir, { clock }).pending, 1);
+  assert.ok(meta().scanPending);
+  assert.strictEqual(history.tick(db, dir, { clock, detail: 'standard' }).pending, 0);
+  assert.strictEqual(meta().scanPending, undefined);
+  assert.strictEqual(meta().scannedReplies, undefined, 'not given up: left for full');
+  // Back at full, the unchanged chat is looked up again when it is recorded (here by Record History of All Chats).
+  history.recordUpdatedSince(db, dir, 0);
+  assert.deepStrictEqual(Object.keys(meta().scanPending.replies), ['reply-3']);
+});

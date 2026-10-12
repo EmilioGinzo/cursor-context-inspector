@@ -24,6 +24,16 @@
 //   subagents/<subagent name>/     a <chat> for each subagent it spawned (nested to any depth)
 //
 // Folders follow renames in Cursor; meta.json's composerId says which chat a folder holds.
+//
+// How much is recorded (options.detail, the cursorContextInspector.historyDetail setting); each level
+// keeps what the one before it keeps. Changing it changes what is recorded from then on, nothing is deleted.
+//   conversation  the messages (blobs, meta.json), chat.md, latest.json
+//   standard      + thinking.json, transcript.md, snapshots/<changedAt>.json
+//   full          + snapshots/<lastUpdatedAt>-<n>.json, the context sent outside the prompt, and the
+//                 messages only the store has (replaced tool results, interrupted replies; .store-index.sqlite)
+const DETAIL = ['conversation', 'standard', 'full'];
+const detailRank = (detail) => (DETAIL.includes(detail) ? DETAIL.indexOf(detail) : DETAIL.length - 1);
+const keeps = (detail, level) => detailRank(detail) >= DETAIL.indexOf(level);
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -225,6 +235,7 @@ function indexFor(db, dir, options) {
 // options.sentContext: rebuild the context sent with new user messages (sentContext.record).
 // options.clock: the time recordedAt is taken from (Date.now).
 // options.index: the store's index (storeIndex.open), kept up to date by the caller.
+// options.detail: how much is recorded (DETAIL; 'full' when not given).
 function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   if (visited.has(composerId)) return 0;
   visited.add(composerId);
@@ -250,15 +261,18 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   // (the state's summary archive names them), and the earlier version of a result that was replaced in
   // the prompt, which nothing in the state names: only the store does, by the call's id. The store is
   // indexed once (storeIndex.cjs), so a lookup is a query, and a lookup runs once a run has ended.
+  // Below 'full' nothing is looked up: the calls and bubbles stay unscanned, for a later 'full' record.
+  const full = keeps(options.detail, 'full');
+  const standard = keeps(options.detail, 'standard');
   const archived = turnSteps.archivedHashes(db, composer.conversationState);
   const turns = turnSteps.loadTurns(db, composer.conversationState);
   const scanned = new Set(previous.scannedCalls || []);
-  const unscanned = [...new Set(turns.flatMap((t) => t.steps).map(turnSteps.callIdOf).filter(Boolean))].filter((id) => !scanned.has(id));
+  const unscanned = full ? [...new Set(turns.flatMap((t) => t.steps).map(turnSteps.callIdOf).filter(Boolean))].filter((id) => !scanned.has(id)) : [];
   // The replies Cursor showed (bubble text) that no recorded message holds: an interrupted reply is kept
   // by Cursor outside the prompt. Each bubble is looked for once its reply is stored (see settle).
   const repliedBefore = previous.scannedReplies || [];
   const replied = new Set(repliedBefore);
-  const pending = turnSteps.bubbleReplies(db, composerId).filter((r) => !replied.has(r.bubble));
+  const pending = full ? turnSteps.bubbleReplies(db, composerId).filter((r) => !replied.has(r.bubble)) : [];
   const texts = pending.length ? recordedTexts(db, dir, [...hashes, ...archived, ...(previous.seen || [])]) : new Set();
   const matched = pending.filter((r) => texts.has(r.text.trim()));
   const missing = pending.filter((r) => !texts.has(r.text.trim()));
@@ -315,10 +329,11 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   // A subagent's messages carry the same context parts as the root's (the wire shows the same
   // blob ids). A message seen before its blob was written is new when the blob arrives.
   const sent = sentContext.record({
-    dir, composer: { ...composer, workspaceIdentifier: workspaceIdentifierOf(db, composer) }, hashes, db, userBlocks,
+    dir, composer: { ...composer, workspaceIdentifier: workspaceIdentifierOf(db, composer) }, composerId, hashes, db, userBlocks,
     seenBefore: new Set((previous.seen || []).filter((h) => !fetched.has(h))),
     readMessage: (hash) => readJson(path.join(dir, 'blobs', `${hash}.json`), undefined),
-  }, options.sentContext);
+    previousSent: previous.sentContext || [],
+  }, full ? options.sentContext : undefined);
   // Unchanged since the last snapshot. Mid-run the messages change while lastUpdatedAt
   // stays at the send time, so the messages are compared, not only the time.
   const latest = readJson(path.join(chatDir, 'latest.json'), undefined);
@@ -328,21 +343,21 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     if (meta.seen) {
       const seenBefore = meta.seen.length;
       remember(meta);
-      if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+      if (sent.length) meta.sentContext = [...(meta.sentContext || []), ...sent];
       if (index) meta.scannedCalls = [...scanned, ...callsDone];
       if (replyMarks.length) meta.scannedReplies = [...new Set([...repliedBefore, ...replyMarks])];
       applyScanPending(meta, dir, composerId, callWaiting, replyWaiting);
-      if (index || meta.seen.length !== seenBefore) {
+      if (full && (index || meta.seen.length !== seenBefore)) {
         const states = recordReplaced(dir, chatDir, composerId, composer, hashes, meta.seen, new Set(archived), options.clock || Date.now);
         if (states) meta.snapshots = (meta.snapshots || 0) + states;
       }
       const relinked = addToolCallId(meta, composer);
       const changed = meta.seen.length !== seenBefore;
-      if (sent || index || changed || relinked || replyMarks.length || waiting.calls || waiting.replies) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
+      if (sent.length || index || changed || relinked || replyMarks.length || waiting.calls || waiting.replies) writeAtomic(metaFile, JSON.stringify(meta, null, 2));
       // The late message may be the one a thinking belongs to.
       if (fetched.size || changed) {
-        recordThinking(db, dir, chatDir, meta, turns, composerId);
-        writeTranscript(db, dir, chatDir, meta, hashes);
+        if (standard) recordThinking(db, dir, chatDir, meta, turns, composerId);
+        writeTranscript(db, dir, chatDir, meta, hashes, options.detail);
       }
     }
     return recorded;
@@ -354,12 +369,12 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
   const model = composer.modelConfig && composer.modelConfig.modelName;
   const clock = options.clock || Date.now;
   let written = 0;
-  for (const { before, state } of earlierStates(dir, hashes, summaries, latest)) {
+  for (const { before, state } of full ? earlierStates(dir, hashes, summaries, latest) : []) {
     written += writeSnapshot(chatDir, `${composer.lastUpdatedAt}-${before}`, {
       composerId, recordedAt: clock(), lastUpdatedAt: composer.lastUpdatedAt, model, state, before, messages: hashes.slice(0, before),
     });
   }
-  written += recordReplaced(dir, chatDir, composerId, composer, hashes, [...new Set([...(previous.seen || []), ...earlier])], new Set(archived), clock);
+  if (full) written += recordReplaced(dir, chatDir, composerId, composer, hashes, [...new Set([...(previous.seen || []), ...earlier])], new Set(archived), clock);
   const snapshot = {
     composerId,
     recordedAt: clock(),
@@ -370,9 +385,10 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     categories: breakdown.categories || [],
     summaries,
     messages: hashes,
-    ...(sent ? { sentContext: sent } : {}),
+    ...(sent.length ? { sentContext: sent } : {}),
   };
-  written += writeSnapshot(chatDir, changedAt(composer), snapshot);
+  // latest.json at every level: it marks the update as recorded.
+  if (standard) written += writeSnapshot(chatDir, changedAt(composer), snapshot);
   writeAtomic(path.join(chatDir, 'latest.json'), JSON.stringify({ ...snapshot, usageTree: composer.promptContextUsageTree }, null, 2));
 
   const meta = { composerId, firstRecordedAt: snapshot.recordedAt, seen: [], ...previous };
@@ -394,11 +410,11 @@ function recordChat(db, composerId, dir, visited = new Set(), options = {}) {
     totalUsedTokens: snapshot.totalUsedTokens,
     snapshots: (meta.snapshots || 0) + written,
   });
-  if (sent) meta.sentContext = [...(meta.sentContext || []), sent];
+  if (sent.length) meta.sentContext = [...(meta.sentContext || []), ...sent];
   addToolCallId(meta, composer);
   writeAtomic(metaFile, JSON.stringify(meta, null, 2));
-  recordThinking(db, dir, chatDir, meta, turns, composerId);
-  writeTranscript(db, dir, chatDir, meta, hashes);
+  if (standard) recordThinking(db, dir, chatDir, meta, turns, composerId);
+  writeTranscript(db, dir, chatDir, meta, hashes, options.detail);
   return recorded + 1;
 }
 
@@ -577,7 +593,8 @@ function keepToolCallIds(file, ids) {
   writeAtomic(file, JSON.stringify(meta, null, 2));
 }
 
-function writeTranscript(db, dir, chatDir, meta, currentHashes) {
+// chat.md, and transcript.md from 'standard' on (see DETAIL).
+function writeTranscript(db, dir, chatDir, meta, currentHashes, detail) {
   const folders = new Map([...folderOwners(path.join(chatDir, 'subagents'))].map(([entry, id]) => [id, entry]));
   // The tool calls each subagent's own meta.json kept (see addToolCallId).
   const known = (id) => (folders.has(id) ? readJson(path.join(chatDir, 'subagents', folders.get(id), 'meta.json'), {}).toolCallIds || [] : []);
@@ -591,8 +608,9 @@ function writeTranscript(db, dir, chatDir, meta, currentHashes) {
     return { ...s, toolCallIds, folder };
   });
   const parent = meta.parentComposerId && store.ancestors(db, meta.composerId).pop();
-  const thinking = readJson(path.join(chatDir, 'thinking.json'), []);
-  writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
+  // Below 'standard' chat.md has no thinking, not even a thinking.json a higher level left.
+  const thinking = keeps(detail, 'standard') ? readJson(path.join(chatDir, 'thinking.json'), []) : [];
+  if (keeps(detail, 'standard')) writeAtomic(path.join(chatDir, 'transcript.md'), transcript(dir, meta, new Set(currentHashes), subagents, parent, thinking));
   const sentWith = new Map((meta.sentContext || []).flatMap((e) => e.messages.map((h) => [h, e])));
   writeAtomic(path.join(chatDir, 'chat.md'), chatMarkdown(meta, recorded.map((m) => m.message), {
     subagents, parent, thinking: thinkingByMessage(thinking, recorded.map((m) => m.hash)),
@@ -619,7 +637,7 @@ function thinkingByMessage(thinking, hashes) {
 
 // Re-render every recorded transcript (after a layout change), refreshing
 // subagent links from Cursor's DB. Metas written by 0.5 lack those fields.
-function rebuildTranscripts(db, dir) {
+function rebuildTranscripts(db, dir, detail) {
   const walk = (chatDir) => {
     const metaFile = path.join(chatDir, 'meta.json');
     const meta = readJson(metaFile, undefined);
@@ -633,10 +651,10 @@ function rebuildTranscripts(db, dir) {
         addToolCallId(meta, composer);
       }
       writeAtomic(metaFile, JSON.stringify(meta, null, 2));
-      for (const id of meta.subagentIds || []) recordChat(db, id, dir);
-      if (row) recordThinking(db, dir, chatDir, meta, turnSteps.loadTurns(db, composer.conversationState), meta.composerId);
+      for (const id of meta.subagentIds || []) recordChat(db, id, dir, undefined, { detail });
+      if (row && keeps(detail, 'standard')) recordThinking(db, dir, chatDir, meta, turnSteps.loadTurns(db, composer.conversationState), meta.composerId);
       const latest = readJson(path.join(chatDir, 'latest.json'), { messages: meta.seen });
-      writeTranscript(db, dir, chatDir, meta, latest.messages);
+      writeTranscript(db, dir, chatDir, meta, latest.messages, detail);
     }
     const subDir = path.join(chatDir, 'subagents');
     if (fs.existsSync(subDir)) for (const id of fs.readdirSync(subDir)) walk(path.join(subDir, id));
@@ -690,7 +708,7 @@ function transcript(dir, meta, current, subagents = [], parent, thinking = []) {
 // top-level chats (0.5–0.6); rename them and move subagents under their parent.
 // Each folder is checked once per recorder; recordChat renames chats that change.
 const checkedFolders = new Set();
-function migrateLayout(db, dir) {
+function migrateLayout(db, dir, detail) {
   const chatsDir = path.join(dir, 'chats');
   let moved = 0;
   const walk = (from, id) => {
@@ -706,14 +724,14 @@ function migrateLayout(db, dir) {
     for (const [entry, subId] of [...folderOwners(subDir)]) walk(path.join(subDir, entry), subId);
     // Chats recorded before 0.10 have no chat.md yet; before thinking was kept, no thinking.json.
     const meta = readJson(path.join(target, 'meta.json'), {});
-    const noThinking = meta.seen && !fs.existsSync(path.join(target, 'thinking.json'));
+    const noThinking = meta.seen && keeps(detail, 'standard') && !fs.existsSync(path.join(target, 'thinking.json'));
     if (noThinking) {
       const row = store.getValue(db, `composerData:${id}`);
       const state = row ? JSON.parse(row).conversationState : undefined;
       recordThinking(db, dir, target, meta, turnSteps.loadTurns(db, state), id);
     }
     if (meta.seen && (noThinking || !fs.existsSync(path.join(target, 'chat.md')))) {
-      writeTranscript(db, dir, target, meta, readJson(path.join(target, 'latest.json'), { messages: meta.seen }).messages);
+      writeTranscript(db, dir, target, meta, readJson(path.join(target, 'latest.json'), { messages: meta.seen }).messages, detail);
     }
     checkedFolders.add(target);
   };
@@ -777,8 +795,8 @@ function listChats(db) {
 // Record chats changed after `since` and up to `until` (ms), oldest first, at most `limit` of them. At
 // least one is recorded per call; after `deadline` (ms, by clock) none more, except the ones that share
 // the last one's time, so that `watermark` (the last one's time) leaves none out. Returns { recorded,
-// watermark, more, unsettled } (unsettled: { id: changedAt }).
-function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent, clock = Date.now, deadline = Infinity, index, chats, saveIndex = true } = {}) {
+// watermark, more, unsettled } (unsettled: { id: changedAt }). detail: how much is recorded (DETAIL).
+function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, limit = -1, sentContext: sent, clock = Date.now, deadline = Infinity, index, chats, saveIndex = true, detail } = {}) {
   const all = (chats || chatsOf(db)).filter((r) => r.t > since && r.t <= until);
   const rows = limit >= 0 ? all.slice(0, limit) : all;
   let recorded = 0;
@@ -790,7 +808,7 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
     if (done > 0 && clock() >= deadline && r.t !== watermark) { stopped = true; break; }
     // One unreadable chat must not stop the others (or the backfill) for good.
     try {
-      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent, clock, index });
+      recorded += recordChat(db, r.id, dir, undefined, { sentContext: sent, clock, index, detail });
       if (unsettled(db, dir, r.id)) pending[r.id] = r.t;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${r.id}:`, err);
@@ -807,13 +825,13 @@ function recordUpdatedSince(db, dir, since, { until = Number.MAX_SAFE_INTEGER, l
 // A chat stuck unsettled (e.g. a blob Cursor never wrote) is given up after
 // `PENDING_MS`; its later changes still reach the recorder by timestamp.
 const PENDING_MS = 86400000;
-function recordPending(db, dir, pending, now, sent, clock, { deadline = Infinity, index, saveIndex = true } = {}) {
+function recordPending(db, dir, pending, now, sent, clock, { deadline = Infinity, index, saveIndex = true, detail } = {}) {
   let recorded = 0;
   const still = {};
   for (const [id, since] of Object.entries(pending)) {
     if (clock() >= deadline) { still[id] = since; continue; }
     try {
-      recorded += recordChat(db, id, dir, undefined, { sentContext: sent, clock, index });
+      recorded += recordChat(db, id, dir, undefined, { sentContext: sent, clock, index, detail });
       if (now - since < PENDING_MS && unsettled(db, dir, id)) still[id] = since;
     } catch (err) {
       console.error(`[context-inspector] could not record chat ${id}:`, err);
@@ -856,8 +874,8 @@ const indexWrittenAt = new Map();
 // Each step stops at its time budget and resumes on the next tick. Nothing is recorded until the store's
 // rows are all read, so the lookups see them. Returns `backfilling` while older chats remain.
 // sentContext: options for sentContext.record ({ enabled, appDir }); rebuilt once per tick.
-// clock: the time now (Date.now). budgetMs: { index, record } (BUDGET_MS).
-function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS } = {}) {
+// clock: the time now (Date.now). budgetMs: { index, record } (BUDGET_MS). detail: how much is recorded (DETAIL).
+function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS, detail } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
   const now = clock();
@@ -865,8 +883,9 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   // Before 0.10 the first run went back only 7 days and never further.
   if (!state.backfill || state.rescan !== RESCAN) state.backfill = { from: backfillDays > 0 ? now - backfillDays * 86400000 : 0, until: state.watermark };
   const rescan = state.rescan !== RESCAN;
-  const index = storeIndex.open(dir);
-  const indexed = index.advance(db, { budgetMs: budgetMs.index, clock });
+  // Only the lookups read the index: below 'full' the store is not read, and nothing waits for it.
+  const index = keeps(detail, 'full') ? storeIndex.open(dir) : undefined;
+  const indexed = index ? index.advance(db, { budgetMs: budgetMs.index, clock }) : { caughtUp: true };
   const before = JSON.stringify([state.backfill, state.pending || {}]);
   let recorded = 0;
   let migrated = false;
@@ -878,18 +897,18 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     const chats = chatsOf(db);
     const deadline = clock() + budgetMs.record;
     // Every tick: windows still running an older version may write id-named or flat folders.
-    migrated = migrateLayout(db, dir);
+    migrated = migrateLayout(db, dir, detail);
     const relayout = migrated || state.layout !== LAYOUT;
-    if (relayout) rebuildTranscripts(db, dir);
+    if (relayout) rebuildTranscripts(db, dir, detail);
     const sentOptions = sent && { ...sent, cache: new Map() };
-    const again = recordPending(db, dir, pending, now, sentOptions, clock, { deadline, index, saveIndex: false });
-    const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false });
+    const again = recordPending(db, dir, pending, now, sentOptions, clock, { deadline, index, saveIndex: false, detail });
+    const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false, detail });
     watermark = result.watermark;
     recorded = again.recorded + result.recorded;
     pending = { ...again.pending };
     for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
     if (!state.backfill.done) {
-      const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false });
+      const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false, detail });
       recorded += older.recorded;
       // Only recent chats wait to settle: an old one stuck unsettled would be retried for nothing.
       for (const [id, t] of Object.entries(older.unsettled)) if (now - t < PENDING_MS) pending[id] = pending[id] || now;
@@ -906,7 +925,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
     writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: indexed.caughtUp };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp };
 }
 
-module.exports = { defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };
+module.exports = { DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

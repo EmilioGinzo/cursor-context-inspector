@@ -71,8 +71,9 @@ function startRecorder(context) {
         db = db || store.openDatabase(dbPath);
         backfilling = !!history.tick(db, historyDir(), {
           backfillDays: settings().get('historyBackfillDays'),
+          detail: settings().get('historyDetail'),
           // Rebuilt with Cursor's own ripgrep and gray-matter.
-          sentContext: { enabled: true, appDir: vscode.env.appRoot },
+          sentContext: { enabled: true, appDir: vscode.env.appRoot, cursorLogsDir: cursorLogsDir(context) },
         }).backfilling;
       }
     } catch (err) {
@@ -82,6 +83,17 @@ function startRecorder(context) {
   };
   timer = setTimeout(run, 5000);
   context.subscriptions.push({ dispose: () => { clearTimeout(timer); if (db) db.close(); storeIndex.close(historyDir()); } });
+}
+
+// Cursor's logs folder (one folder per launch: <YYYYMMDDTHHMMSS>/), above this extension's own log
+// folder (<launch>/window<n>/exthost/<extension>); on every platform. undefined: the default is used.
+function cursorLogsDir(context) {
+  let dir = context.logUri && context.logUri.fsPath;
+  while (dir && path.dirname(dir) !== dir) {
+    if (/^\d{8}T\d{6}$/.test(path.basename(dir))) return path.dirname(dir);
+    dir = path.dirname(dir);
+  }
+  return undefined;
 }
 
 async function openHistoryFolder() {
@@ -103,7 +115,7 @@ async function recordAll(context) {
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Recording all chat history…' }, async () => {
     const db = store.openDatabase(databasePath(context));
     try {
-      const { recorded } = history.recordUpdatedSince(db, historyDir(), 0);
+      const { recorded } = history.recordUpdatedSince(db, historyDir(), 0, { detail: settings().get('historyDetail') });
       vscode.window.showInformationMessage(`Recorded ${recorded} chat snapshot(s) in ${historyDir()}.`);
     } finally {
       db.close();

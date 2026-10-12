@@ -14,6 +14,8 @@ const { DatabaseSync } = require('node:sqlite');
 const rc = require('../src/requestContext.cjs');
 const sources = require('../src/contextSources.cjs');
 const history = require('../src/history.cjs');
+const mcpConnections = require('../src/mcpConnections.cjs');
+const sentContext = require('../src/sentContext.cjs');
 
 const APP = sources.DEFAULT_APP_DIR;
 const haveCursor = fs.existsSync(path.join(APP, 'node_modules', 'gray-matter'));
@@ -172,7 +174,7 @@ test('the recorder keeps the context sent with each new user message, once, and 
   assert.match(rulesMd, /<details><summary><code>[^<]*always\.mdc<\/code> — global<\/summary>/);
   assert.match(rulesMd, /Always do this\./);
   const snap = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'snapshots', `${now}.json`), 'utf8'));
-  assert.deepStrictEqual(snap.sentContext.messages, [hashOf(q2)]);
+  assert.deepStrictEqual(snap.sentContext.map((e) => e.messages), [[hashOf(q2)]]);
 
   const md = fs.readFileSync(path.join(dir, 'chats', 'Chat c1', 'chat.md'), 'utf8');
   const sections = md.split('<details><summary>Context sent with this message, rebuilt (not in the prompt)</summary>');
@@ -409,4 +411,299 @@ test('a user message whose blob Cursor writes late still gets its context', { sk
   history.recordChat(db, 'c', dir, undefined, options);
   assert.deepStrictEqual(meta().sentContext.map((e) => e.messages), [[hashOf(q)]]);
   assert.match(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8'), /Context sent with this message, rebuilt/);
+});
+
+test('the MCP servers sent inline are the set in Cursor\'s bundle (rFE), not a list kept here', (t) => {
+  // Minified the way the bundle has it: the export names a variable, the Set is built from string constants.
+  const bundle = 'var __webpack_modules__={78772:(e,t,r)=>{"use strict";r.d(t,{rFE:()=>Ne,riQ:()=>Me,acw:()=>Oe,iKs:()=>Je});'
+    + 'let x=1,Oe="cursor-dev-control",Je="custom-user-tools",Me="cursor-ide-browser",Be=new Set(["cursor-app-control",Me,Oe]);'
+    + 'function De(e){return!Be.has(e)}const qe="cursor",Ne=new Set([Oe,Me,"my-browser"]);}};';
+  assert.deepStrictEqual([...sources.parseInlineServers(bundle)].sort(), ['cursor-dev-control', 'cursor-ide-browser', 'my-browser']);
+  const root = tmp(t);
+  write(path.join(root, 'extensions', 'cursor-agent-exec', 'dist', 'main.js'), bundle);
+  assert.strictEqual(sources.inlineMcpServers(root).source, 'bundle');
+  assert.deepStrictEqual([...sources.inlineMcpServers(root).servers].sort(), ['cursor-dev-control', 'cursor-ide-browser', 'my-browser']);
+  // No bundle, or one without the set: the built-in list, and the note says so.
+  const none = path.join(root, 'none');
+  assert.strictEqual(sources.inlineMcpServers(none).source, 'fallback');
+  assert.deepStrictEqual([...sources.inlineMcpServers(none).servers], [...sources.INLINE_MCP_SERVERS_FALLBACK]);
+  assert.strictEqual(sources.parseInlineServers('no set here'), undefined);
+  assert.ok(sources.environment({ appDir: none, home: root }).notes.some((n) => /built-in list/.test(n)));
+  // The part follows the bundle: a server it names is sent in full, one it does not name by name only.
+  const home = path.join(root, 'home');
+  const ws = path.join(root, 'ws');
+  fs.mkdirSync(ws, { recursive: true });
+  const slug = ws.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  const mcps = path.join(home, '.cursor', 'projects', slug, 'mcps');
+  write(path.join(mcps, 'my-browser', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'my-browser', serverName: 'Mine' }));
+  write(path.join(mcps, 'my-browser', 'tools', 'open.json'), JSON.stringify({ name: 'open', description: 'Opens.' }));
+  write(path.join(mcps, 'other', 'SERVER_METADATA.json'), JSON.stringify({ serverIdentifier: 'other', serverName: 'Other' }));
+  write(path.join(mcps, 'other', 'tools', 'x.json'), JSON.stringify({ name: 'x', description: 'X.' }));
+  const { parts } = sources.buildParts([ws], { home, appDir: root });
+  assert.deepStrictEqual(parts.mcps.tools.map((x) => x.name), ['my-browser-open']);
+});
+
+test('annotation counts are of distinct parts: a rescan, or a VACUUM that renumbers the rows, counts them once', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const kept = (value) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools: [{ tool_name: 'alpha', annotations_json: value }, { tool_name: 'zeta' }] }] } });
+  // A row before the parts, deleted later: its gap is what a VACUUM closes, renumbering the parts.
+  put('junk', Buffer.from('not a part'));
+  put('agentKv:blob:a1', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a2', kept('{"readOnlyHint":true}'));
+  put('agentKv:blob:a3', kept('{"readOnlyHint":false}'));
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  save('c', Date.now(), [user('one')]);
+  const dir = path.join(root, 'history');
+  const record = () => history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  const file = path.join(dir, 'context', 'tool-annotations.json');
+  const known = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const counts = () => Object.entries(known().tools[sources.annotationKey('srv', 'alpha')]).map(([v, e]) => [v, e.count]).sort();
+  const same = [['{"readOnlyHint":false}', 1], ['{"readOnlyHint":true}', 2]];
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // An hourly scan that is due reads the same rows again: nothing is counted twice.
+  fs.writeFileSync(file, JSON.stringify({ ...known(), scannedAt: 0 }));
+  save('c', Date.now(), [user('one'), user('two')]);
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // The junk row goes, and the rows are renumbered without their gap, as VACUUM may do (SQLite here keeps
+  // the rowids through VACUUM, so the renumbering is done by hand, in order). The rescan reads them again,
+  // counts none of them twice, and the value stored last is still the one used.
+  const rowOf = (key) => db.prepare('SELECT rowid AS id FROM cursorDiskKV WHERE key = ?').get(key).id;
+  const before = rowOf('agentKv:blob:a3');
+  db.prepare("DELETE FROM cursorDiskKV WHERE key = 'junk'").run();
+  let next = 1;
+  for (const r of db.prepare('SELECT rowid AS id, key FROM cursorDiskKV ORDER BY rowid').all()) {
+    db.prepare('UPDATE cursorDiskKV SET rowid = ? WHERE key = ?').run(next++, r.key);
+  }
+  assert.notStrictEqual(rowOf('agentKv:blob:a3'), before, 'the rows were renumbered');
+  fs.writeFileSync(file, JSON.stringify({ ...known(), scannedAt: 0 }));
+  save('c', Date.now(), [user('one'), user('two'), user('three')]);
+  record();
+  assert.deepStrictEqual(counts(), same);
+  // The last stored value's row is the row it has now.
+  assert.strictEqual(known().tools[sources.annotationKey('srv', 'alpha')]['{"readOnlyHint":false}'].lastRowid, rowOf('agentKv:blob:a3'));
+});
+
+test('a tool the request sends that has no annotation yet is looked for at once, not at the next hourly scan', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const slug = ws.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  write(path.join(home, '.cursor', 'projects', slug, 'mcps', 'srv', 'tools', 'beta.json'), JSON.stringify({ name: 'beta', description: 'B.' }));
+  const { db, put, save } = chatDb(ws);
+  const kept = (tools) => rc.encode(rc.PART_TYPES.mcps, { mcp_meta_tool_options: { enabled: true, mcp_descriptors: [{ server_identifier: 'srv', server_name: 'Server', tools }] } });
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  put('agentKv:blob:a1', kept([{ tool_name: 'alpha', annotations_json: '{"readOnlyHint":true}' }]));
+  save('c', Date.now(), [user('one')]);
+  const dir = path.join(root, 'history');
+  const options = { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } };
+  const entries = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext;
+  const betaOf = (entry) => rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors[0].tools.find((x) => x.tool_name === 'beta');
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.strictEqual(betaOf(entries()[0]).annotations_json, undefined);
+  // The server's part with beta's annotation is stored after that scan, well within the hour.
+  put('agentKv:blob:a2', kept([{ tool_name: 'beta', annotations_json: '{"destructiveHint":true}' }]));
+  save('c', Date.now(), [user('one'), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  assert.strictEqual(betaOf(entries()[1]).annotations_json, '{"destructiveHint":true}');
+});
+
+test('the bundle of this Cursor, when it is installed, names the browser server inline', { skip: !fs.existsSync(path.join(APP, 'extensions', 'cursor-agent-exec', 'dist', 'main.js')) && 'needs Cursor\'s bundle' }, () => {
+  const { source, servers } = sources.inlineMcpServers(APP);
+  assert.strictEqual(source, 'bundle');
+  assert.ok(servers.has('cursor-ide-browser'));
+});
+
+test('the files the chat wrote are kept as they are on disk: once per change, even with no new message', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const file = path.join(root, 'tickets', 'expectations.md');
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  const wrote = (callId, p, result = `Wrote contents to ${p}`) => [
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: callId, toolName: 'Write', args: { path: p, contents: 'x' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: callId, result }] },
+  ];
+  const dir = path.join(root, 'history');
+  const options = { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } };
+  const meta = () => JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8'));
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  write(file, 'first draft\n');
+  save('c', Date.now(), [user('one'), ...wrote('t1', file)]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  let entries = meta().sentContext;
+  assert.deepStrictEqual(Object.keys(entries[0].files), [file]);
+  assert.strictEqual(entries[0].files[file].id, sha('first draft\n'));
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'context', `${sha('first draft\n')}.bin`), 'utf8'), 'first draft\n');
+  // The file changes after the message: its new contents are recorded, in an entry of their own, once.
+  write(file, 'second draft\n');
+  // A whole second: the time set again below is the same to the sub-millisecond.
+  const mtime = new Date(2026, 0, 1);
+  fs.utimesSync(file, mtime, mtime);
+  save('c', Date.now(), [user('one'), ...wrote('t1', file)]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 2);
+  assert.deepStrictEqual(entries[1].messages, []);
+  assert.strictEqual(entries[1].files[file].id, sha('second draft\n'));
+  // A new message while the file is the same: its entry carries the file, and no entry of its own comes with it.
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 3);
+  assert.strictEqual(entries[2].files[file].id, sha('second draft\n'));
+  // The panel shows the files with the parts.
+  const cat = sentContext.panelCategory(path.join(dir), meta());
+  assert.ok(cat.items.some((i) => i.id === `sent:file:${file}` && i.text.includes('second draft')));
+  // Unchanged on disk (size and time): not read again. Same size, same time, other bytes: still the recorded ones.
+  write(file, 'SECOND draft\n');
+  fs.utimesSync(file, mtime, mtime);
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.strictEqual(meta().sentContext.length, 3);
+  // The file is deleted and a message sent: its entry has no files, nothing more is added, the panel shows none.
+  fs.rmSync(file);
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two'), user('three')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 4);
+  assert.deepStrictEqual(entries[3].files, {});
+  assert.ok(!sentContext.panelCategory(path.join(dir), meta()).items.some((i) => i.id.startsWith('sent:file:')));
+});
+
+test('a file the chat wrote with credentials in it is stored with them replaced', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const file = path.join(root, 'notes.md');
+  const token = `ghp_${'a'.repeat(36)}`;
+  write(file, `clone with ${token}\n`);
+  save('c', Date.now(), [{ role: 'user', content: '<user_query>\none\n</user_query>' }, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 't1', toolName: 'Write', args: { path: file, contents: '' } }] }, { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', result: `Wrote contents to ${file}` }] }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: Date.now() } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const f = entry.files[file];
+  assert.strictEqual(f.redacted.count, 1);
+  assert.strictEqual(f.id, crypto.createHash('sha256').update(`clone with ${token}\n`).digest('hex'), 'the id is the sha256 of the bytes read');
+  assert.strictEqual(sentContext.loadFile(path.join(dir), f.id), `clone with [redacted]\n`);
+  assert.ok(!fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'chat.md'), 'utf8').includes(token));
+  assert.ok(!fs.readdirSync(path.join(dir, 'context')).some((n) => fs.readFileSync(path.join(dir, 'context', n), 'utf8').includes(token)));
+});
+
+test('a message is matched with the context as it was when it was sent: its user bubble gives the time', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, put, save } = chatDb(ws);
+  const T1 = Date.now() - 600e3;
+  const T2 = Date.now() - 300e3;
+  const user = (text) => ({ role: 'user', content: `<user_query>\n${text}\n</user_query>` });
+  put('bubbleId:c:b1', JSON.stringify({ type: 1, text: 'one', createdAt: new Date(T1).toISOString() }));
+  put('bubbleId:c:b2', JSON.stringify({ type: 1, text: 'two', createdAt: new Date(T2).toISOString() }));
+  save('c', T2 + 1000, [user('one'), user('two')]);
+  // The server fails to connect between the two messages: the second one is sent without its tools.
+  const logs = path.join(root, 'logs');
+  write(path.join(logs, launchName(T1), 'mcp-server-srv.log'), `${logTime(T2 - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now: T2 + 2000, cursorLogsDir: logs } });
+  const entries = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext;
+  assert.deepStrictEqual(entries.map((e) => [e.messageAt, e.messages]), [[T1, [hashOf(user('one'))]], [T2, [hashOf(user('two'))]]]);
+  const srvTools = (e) => (rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${e.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors.find((d) => d.server_identifier === 'srv').tools || []).length;
+  assert.strictEqual(srvTools(entries[0]), 2);
+  assert.strictEqual(srvTools(entries[1]), 0);
+});
+
+test('only the files a Write reported writing count: not a failed one, an edit, or a read', () => {
+  const write = (callId, p, result) => [
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: callId, toolName: 'Write', args: { path: p, contents: '' } }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: callId, result }] },
+  ];
+  const hashes = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+  const messages = {
+    h1: write('a', '/w/ok.md', 'Wrote contents to /w/ok.md')[0],
+    h2: write('a', '/w/ok.md', 'Wrote contents to /w/ok.md')[1],
+    h3: write('b', '/w/failed.md', 'Error: Tool failed')[0],
+    h4: write('b', '/w/failed.md', 'Error: Tool failed')[1],
+    h5: { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c', toolName: 'StrReplace', args: { path: '/w/edited.md', old_string: 'a', new_string: 'b' } }] },
+    h6: { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'd', toolName: 'Read', args: { path: '/w/read.md' } }] },
+  };
+  assert.deepStrictEqual(sentContext.writtenFiles(hashes, (h) => messages[h]), ['/w/ok.md']);
+});
+
+// Cursor's log time (local, as the machine's clock) for a Date's epoch ms, and a launch folder's name.
+const logTime = (ms) => {
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+};
+const launchName = (ms) => logTime(ms).replace(/[-: ]/g, '').replace(/\.\d+$/, '').replace(/(\d{8})(\d{6})/, '$1T$2');
+
+test('a server that connected again after its failure is connected; one that failed last, just before, is not', (t) => {
+  const logs = path.join(tmp(t), 'logs');
+  const at = new Date(2026, 9, 10, 14, 45, 30).getTime();
+  const launch = path.join(logs, '20261010T144508');
+  // Its own log: failed, then "Successfully connected" ten seconds before the time (no note of it in the workbench logs).
+  write(path.join(launch, 'mcp-server-back.log'), [
+    `${logTime(at - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed`,
+    `${logTime(at - 10e3)} [info] Successfully connected to streamableHttp server`,
+  ].join('\n') + '\n');
+  // A stdio server stopped, then connected again.
+  write(path.join(launch, 'mcp-server-local.log'), `${logTime(at - 8e3)} [info] Successfully connected to stdio server\n`);
+  // A client that failed, then only began again (initializing is not an outcome); a failure a few seconds before the time.
+  write(path.join(launch, 'window1', 'workbench.mcp.files.log'), [
+    `${logTime(at - 50e3)} [error] [MCPService] createClient completed for server: flaky, connected=false, statusType=error, error=x`,
+    `${logTime(at - 40e3)} [info] [MCPService] createClient completed for server: flaky, statusType=initializing, success=true`,
+  ].join('\n') + '\n');
+  write(path.join(launch, 'mcp-server-down.log'), `${logTime(at - 5e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  write(path.join(launch, 'mcpprocess.log'), `${logTime(at - 20e3)} [info] stopped connection: local\n${logTime(at - 4e3)} [info] stopped connection: stopped\n`);
+  const connections = mcpConnections.connectionsAt(logs, at);
+  assert.deepStrictEqual([...connections].sort(), [['back', true], ['down', false], ['flaky', false], ['local', true], ['stopped', false]]);
+});
+
+test('a server is connected at a time when the last connection evidence before it says so', (t) => {
+  const logs = path.join(tmp(t), 'logs');
+  const at = new Date(2026, 9, 10, 14, 30, 38).getTime();
+  const launch = path.join(logs, '20261010T142947');
+  write(path.join(launch, 'mcp-server-srv.log'), `${logTime(at - 47e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  write(path.join(launch, 'window1', 'workbench.mcp.files.log'), [
+    `${logTime(at - 40e3)} [info] [MCPService] createClient completed for server: ide, connected=true, statusType=connected`,
+    `${logTime(at - 30e3)} [info] [MCPService] createClient completed for server: srv, connected=true, statusType=connected`,
+    `${logTime(at - 20e3)} [info] [MCPService] createClient completed for server: ide, connected=false, statusType=error, error=fetch failed`,
+    `${logTime(at + 60e3)} [info] [MCPService] createClient completed for server: srv, connected=false, statusType=error, error=later`,
+  ].join('\n') + '\n');
+  // A launch that began after the time is not read; the logs of an earlier one are.
+  write(path.join(logs, '20261010T143441', 'window1', 'workbench.mcp.files.log'), `${logTime(at + 10e3)} [info] createClient completed for server: ide, connected=true, statusType=connected\n`);
+  write(path.join(logs, '20261010T100000', 'mcp-server-old.log'), `${logTime(at - 3600e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  const connections = mcpConnections.connectionsAt(logs, at);
+  // The failure an hour before says nothing now (a server that recovered is not logged again): 'old' is left out.
+  assert.deepStrictEqual([...connections].sort(), [['ide', false], ['srv', true]]);
+  assert.strictEqual(mcpConnections.isConnected(connections, 'never-seen'), true);
+  assert.strictEqual(mcpConnections.isConnected(connections, 'ide'), false);
+  assert.strictEqual(mcpConnections.connectionsAt(path.join(logs, 'missing'), at), undefined);
+  assert.strictEqual(mcpConnections.isConnected(undefined, 'anything'), true);
+  // Before any evidence, nothing is known about the server: taken as connected.
+  assert.strictEqual(mcpConnections.connectionsAt(logs, at - 5 * 3600e3), undefined);
+  assert.strictEqual(launchName(at), '20261010T143038');
+});
+
+test('a server Cursor had not connected is sent with no tools and no instructions, and the note says so', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
+  const root = tmp(t);
+  const { home, ws } = sourcesFixture(root);
+  const { db, save } = chatDb(ws);
+  const now = Date.now();
+  const logs = path.join(root, 'logs');
+  // The fixture's server (srv) failed to connect a minute before the message; its Transient error is in its own log.
+  write(path.join(logs, launchName(now - 3600e3), 'mcp-server-srv.log'), `${logTime(now - 3600e3 - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
+  save('c', now - 3600e3, [{ role: 'user', content: '<user_query>\nhi\n</user_query>' }]);
+  const dir = path.join(root, 'history');
+  history.recordChat(db, 'c', dir, undefined, { sentContext: { enabled: true, appDir: APP, home, now, cursorLogsDir: logs, maxAgeMs: Infinity } });
+  const entry = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'Chat c', 'meta.json'), 'utf8')).sentContext[0];
+  const meta = rc.decodePart('mcps', fs.readFileSync(path.join(dir, 'context', `${entry.parts.mcps.id}.bin`))).mcp_meta_tool_options.mcp_descriptors;
+  // (An empty list is not encoded: the descriptor is there, with no tool.)
+  assert.strictEqual((meta.find((d) => d.server_identifier === 'srv').tools || []).length, 0);
+  assert.strictEqual(meta.find((d) => d.server_identifier === 'srv').server_use_instructions, undefined);
+  assert.ok(entry.notes.some((n) => /not connected when the message was sent.*Server/.test(n)));
 });

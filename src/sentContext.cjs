@@ -7,18 +7,23 @@
 // <history>/context/<sha256>.redacted.bin  the same, when it held credentials: replaced (redact.cjs);
 //                                  the name keeps the sha256 of the bytes before, the one to compare
 // <history>/context/<sha256>.md    the same part, readable (collapsed sections, nothing cut)
-// <chat>/meta.json  sentContext    per user message: the part ids, when and how they were rebuilt
+// <history>/context/<sha256>.bin   a file the chat wrote, as it is on disk (the id: its bytes' sha256)
+// <chat>/meta.json  sentContext    per user message: the part ids, when and how they were rebuilt, and
+//                                  the files the chat wrote (`files`: path -> id), see writtenFiles
 //
 // Cursor keeps none of it, so the parts are rebuilt from their sources (contextSources.cjs) when
 // the recorder sees a new user message, shortly after it was sent. A part is only "what Cursor
 // sent" when its sha256 is one Cursor used: `cursor-context wire compare` checks the ids against
 // captured traffic; `storedByCursor` lists parts Cursor itself kept in agentKv under that id.
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const rc = require('./requestContext.cjs');
 const sources = require('./contextSources.cjs');
-const { redactValue } = require('./redact.cjs');
+const mcpConnections = require('./mcpConnections.cjs');
+const { redactText, redactValue } = require('./redact.cjs');
 
 // A message is matched with a rebuild made at most this long after it: later, the sources (rule
 // files, skills...) are more likely to have changed since the message was sent.
@@ -75,25 +80,34 @@ function pluginIds(db, dir, plugins, now) {
 // parts it stored in agentKv (the server asked for those bytes), so they are read from there, at most
 // once an hour, and remembered in context/tool-annotations.json. Servers change them (a title was
 // renamed in the captured runs): every distinct value is kept with its count and the row it was last
-// seen in, and the one stored last is used. Blob rows are written once, so each scan reads only the
-// rows after the last one it saw.
+// seen in, and the one stored last is used. A tool the request sends with no value yet triggers a
+// scan at once (it is new since the last one).
+//
+// Counts are of distinct blobs: a blob is a part Cursor stored under its sha256, so it is counted
+// once, however many scans read it (`seen` keeps the keys read). Rows are read after the newest one
+// the last scan saw (`top`: its rowid and key). A VACUUM renumbers rows, and a row can be deleted:
+// when the top row is no longer at its rowid, the table is read again, and the rows already seen are
+// skipped; the rowids of each value's last blob are looked up again, so the order stays the stored one.
 const ANNOTATION_RESCAN_MS = 60 * 60 * 1000;
 
 // { annotations: Map of key -> annotations_json (the last stored), conflicts: tools with more than one value }.
-// File: { scannedAt, lastRowid, tools: { key: { annotations_json: { count, lastRowid } } } }.
-function toolAnnotations(db, dir, now) {
+// File: { scannedAt, lastRowid, top: { rowid, key }, seen: [blob keys],
+//         tools: { key: { annotations_json: { count, lastRowid, lastKey } } } }.
+// wanted: the keys (sources.annotationKey) of the tools the request sends now.
+function toolAnnotations(db, dir, now, wanted = []) {
   const file = path.join(dir, 'context', 'tool-annotations.json');
-  let known = { scannedAt: 0, lastRowid: 0, tools: {} };
+  let known = { scannedAt: 0, lastRowid: 0, seen: [], tools: {} };
   try {
     known = { ...known, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
-    known.tools = mergeAnnotations(known.tools, {});
   } catch {
     /* none yet */
   }
-  if (now - known.scannedAt >= ANNOTATION_RESCAN_MS) {
-    const found = scanAnnotations(db, known.lastRowid);
-    known = { scannedAt: now, lastRowid: found.lastRowid, tools: mergeAnnotations(known.tools, found.tools) };
-    writeAtomic(file, JSON.stringify(known, null, 2));
+  known.tools = normalizeTools(known.tools);
+  const missing = wanted.some((key) => !known.tools[key]);
+  if (now - known.scannedAt >= ANNOTATION_RESCAN_MS || missing) {
+    const next = scanInto(db, known, now);
+    if (JSON.stringify(next) !== JSON.stringify(known)) writeAtomic(file, JSON.stringify(next, null, 2));
+    known = next;
   }
   const annotations = new Map();
   let conflicts = 0;
@@ -105,19 +119,56 @@ function toolAnnotations(db, dir, now) {
   return { annotations, conflicts };
 }
 
-// Rows after `after` (up to the newest one now): { tools: { key: { json: { count, lastRowid } } }, lastRowid }.
-function scanAnnotations(db, after) {
-  let top = after;
+// Earlier files kept one string per tool, which counts once.
+function normalizeTools(tools = {}) {
+  const out = {};
+  for (const [key, values] of Object.entries(tools)) out[key] = typeof values === 'string' ? { [values]: { count: 1, lastRowid: 0 } } : { ...values };
+  return out;
+}
+
+const rowidOf = (db, key) => {
+  try {
+    const r = db.prepare('SELECT rowid AS id FROM cursorDiskKV WHERE key = ?').get(key);
+    return r ? r.id : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// The state after reading the rows the last scan had not seen (or all of them, when renumbered).
+function scanInto(db, known, now) {
+  const seen = new Set(known.seen || []);
+  const tools = known.tools;
+  let top;
+  try {
+    top = db.prepare('SELECT rowid AS id, key FROM cursorDiskKV ORDER BY rowid DESC LIMIT 1').get();
+  } catch {
+    return { ...known, scannedAt: now };
+  }
+  // The last scan's top row, if it is still there at its rowid: rows after it are new. Otherwise the
+  // table was renumbered (a VACUUM) or lost rows: all of it is read again.
+  const renumbered = known.top !== undefined && rowidOf(db, known.top.key) !== known.top.rowid;
+  // Earlier files have no top: they are read after the rowid they kept.
+  const after = known.top === undefined ? known.lastRowid : renumbered ? 0 : known.top.rowid;
+  if (renumbered) {
+    for (const values of Object.values(tools)) {
+      for (const e of Object.values(values)) {
+        const r = e.lastKey !== undefined ? rowidOf(db, e.lastKey) : undefined;
+        if (r !== undefined) e.lastRowid = r;
+      }
+    }
+  }
+  const upTo = top ? top.id : after;
   let rows = [];
   try {
-    top = db.prepare('SELECT max(rowid) AS top FROM cursorDiskKV').get().top ?? after;
-    if (top < after) return scanAnnotations(db, 0); // the table was rebuilt: read it all again
-    rows = db.prepare("SELECT rowid AS id, value FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? AND key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all(after, top);
+    rows = db.prepare("SELECT rowid AS id, key, value FROM cursorDiskKV WHERE rowid > ? AND rowid <= ? AND key LIKE 'agentKv:blob:%' AND instr(CAST(value AS TEXT), 'Hint\"') > 0").all(after, upTo);
   } catch {
-    return { tools: {}, lastRowid: after };
+    /* read again next time */
+    return { ...known, scannedAt: now };
   }
-  const tools = {};
   for (const r of rows) {
+    if (seen.has(r.key)) continue;
+    seen.add(r.key);
     const data = Buffer.from(r.value);
     if (!rc.looksLikePart('mcps', data)) continue;
     const options = rc.decodePart('mcps', data).mcp_meta_tool_options;
@@ -127,28 +178,17 @@ function scanAnnotations(db, after) {
         const values = (tools[sources.annotationKey(d.server_identifier, t.tool_name)] ??= {});
         const e = (values[t.annotations_json] ??= { count: 0, lastRowid: 0 });
         e.count++;
-        e.lastRowid = Math.max(e.lastRowid, r.id);
+        if (r.id >= e.lastRowid) Object.assign(e, { lastRowid: r.id, lastKey: r.key });
       }
     }
   }
-  return { tools, lastRowid: top };
-}
-
-// Adds the counts of `found` to `known`, keeping every value either has (none is dropped).
-function mergeAnnotations(known, found) {
-  const out = {};
-  for (const [key, values] of Object.entries(known)) {
-    // Earlier files kept one string per tool: it counts once.
-    out[key] = typeof values === 'string' ? { [values]: { count: 1, lastRowid: 0 } } : { ...values };
-  }
-  for (const [key, values] of Object.entries(found)) {
-    out[key] = { ...(out[key] || {}) };
-    for (const [json, e] of Object.entries(values)) {
-      const old = out[key][json] || { count: 0, lastRowid: 0 };
-      out[key][json] = { count: old.count + e.count, lastRowid: Math.max(old.lastRowid, e.lastRowid) };
-    }
-  }
-  return out;
+  return {
+    scannedAt: now,
+    lastRowid: upTo,
+    top: top ? { rowid: top.id, key: top.key } : known.top,
+    seen: [...seen],
+    tools,
+  };
 }
 
 // Written beside the old file, then renamed over it: a crash leaves the last complete file.
@@ -175,16 +215,20 @@ function findPluginIds(db, plugin, key) {
   return {};
 }
 
-// Rebuilds the parts for these workspace folders, at most once per `cache` (one recorder tick).
-function rebuild(folders, options, cache, db, dir) {
-  const key = JSON.stringify(folders);
+// Rebuilds the parts for these workspace folders as they were at `at` (the message's time: which
+// MCP servers were connected then), at most once per `cache` (one recorder tick).
+function rebuild(folders, options, cache, db, dir, at) {
+  const key = JSON.stringify([folders, at]);
   if (cache && cache.has(key)) return cache.get(key);
   let result;
   try {
-    const env = sources.environment(options);
+    const logs = options.cursorLogsDir || path.join(options.home || os.homedir(), '.config', 'Cursor', 'logs');
+    const env = sources.environment({ ...options, connections: mcpConnections.connectionsAt(logs, at) });
     if (db) env.pluginIds = pluginIds(db, dir, sources.installedPlugins(env), Date.now());
     if (db) {
-      const annotations = toolAnnotations(db, dir, Date.now());
+      // The tools the request sends (their names, as the folders have them) decide whether to scan now.
+      const wanted = sources.annotationKeysOf(sources.mcpsPart(env, folders));
+      const annotations = toolAnnotations(db, dir, Date.now(), wanted);
       env.toolAnnotations = annotations.annotations;
       env.annotationConflicts = annotations.conflicts;
     }
@@ -198,17 +242,81 @@ function rebuild(folders, options, cache, db, dir) {
 }
 
 // Called by the recorder for a new snapshot of a (root) chat. Returns the entry to add to
-// meta.sentContext, or undefined. options: { enabled, now, maxAgeMs, appDir, home, cache }.
-function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db }, options = {}) {
-  if (!options.enabled) return undefined;
+// meta.sentContext, or undefined. options: { enabled, now, maxAgeMs, appDir, home, cursorLogsDir, cache }.
+// The entries to add to meta.sentContext: one per send time of the new user messages (a message is
+// matched with the parts as they were when it was sent: see sendTimes), and one with no message when
+// only the files the chat wrote changed. input.previousSent: the chat's entries so far (the files last
+// recorded are compared with); input.composerId: the chat (its user bubbles give the send times).
+function record({ dir, composer, composerId, hashes, seenBefore, readMessage, userBlocks, db, previousSent }, options = {}) {
+  if (!options.enabled) return [];
   const now = options.now ?? Date.now();
   const maxAge = options.maxAgeMs ?? LIVE_MS;
-  if (now - composer.lastUpdatedAt > maxAge) return undefined;
+  if (now - composer.lastUpdatedAt > maxAge) return [];
   const messages = newUserMessages(hashes, seenBefore, readMessage, userBlocks);
-  if (!messages.length) return undefined;
+  // The files the chat wrote, as they are on disk now: recorded again when they change, even with no new message.
+  const last = lastFiles(previousSent);
+  const written = writtenContents(dir, writtenFiles(hashes, readMessage), last);
+  const changed = !sameFiles(written, last);
+  if (!messages.length && !changed) return [];
+  if (!messages.length) return [{ messages: [], messageAt: composer.lastUpdatedAt, rebuiltAt: now, source: 'rebuilt', files: written }];
   const folders = sources.workspaceFolders(composer.workspaceIdentifier);
-  const built = rebuild(folders, options, options.cache, db, dir);
-  const entry = { messages, messageAt: composer.lastUpdatedAt, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
+  return [...sendTimes(db, composerId, messages, readMessage, composer.lastUpdatedAt)].sort((a, b) => a[0] - b[0])
+    .map(([at, group]) => messageEntry({ dir, db, options, folders, written, messages: group, at }));
+}
+
+// The new user messages by the time they were sent. Cursor creates a user bubble (type 1, with the
+// text typed, and its createdAt) when a message is sent, so a message is matched by its text to the
+// latest bubble with that text at or before the chat's last update. Without one: that update's time.
+function sendTimes(db, composerId, messages, readMessage, lastUpdatedAt) {
+  const bubbles = userBubbles(db, composerId);
+  const out = new Map();
+  for (const h of messages) {
+    const list = bubbles.get(userText(readMessage(h))) || [];
+    const at = [...list].reverse().find((t) => t <= lastUpdatedAt) ?? lastUpdatedAt;
+    if (!out.has(at)) out.set(at, []);
+    out.get(at).push(h);
+  }
+  return out;
+}
+
+// The user bubbles of a chat: text (trimmed) -> their createdAt times, in order.
+function userBubbles(db, composerId) {
+  const out = new Map();
+  if (!db || !composerId) return out;
+  let rows = [];
+  try {
+    // A key range, not LIKE: LIKE ignores case, so it cannot use the key index and reads the whole table.
+    rows = db.prepare('SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(`bubbleId:${composerId}:`, `bubbleId:${composerId};`);
+  } catch {
+    return out;
+  }
+  for (const r of rows) {
+    let b;
+    try {
+      b = JSON.parse(String(r.value));
+    } catch {
+      continue;
+    }
+    if (b.type !== 1 || typeof b.text !== 'string' || !b.createdAt) continue;
+    const text = b.text.trim();
+    out.set(text, [...(out.get(text) || []), Date.parse(b.createdAt)].sort((x, y) => x - y));
+  }
+  return out;
+}
+
+// The text a user message carries: its <user_query> block, or the whole text.
+function userText(m) {
+  const raw = !m ? '' : typeof m.content === 'string' ? m.content
+    : Array.isArray(m.content) ? m.content.filter((p) => p.type === 'text').map((p) => p.text || '').join('') : '';
+  const q = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/.exec(raw);
+  return (q ? q[1] : raw).trim();
+}
+
+// The entry for messages sent at `at`: the parts as they were rebuilt for that time, with the files.
+function messageEntry({ dir, db, options, folders, written, messages, at }) {
+  const built = rebuild(folders, options, options.cache, db, dir, at);
+  const entry = { messages, messageAt: at, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
+  entry.files = written;
   if (built.error) return { ...entry, error: redactValue(built.error).value };
   entry.parts = {};
   entry.storedByCursor = [];
@@ -231,6 +339,89 @@ function record({ dir, composer, hashes, seenBefore, readMessage, userBlocks, db
   }
   if (built.notes.length) entry.notes = redactValue(built.notes).value;
   return entry;
+}
+
+// The files the chat wrote with its Write tool, in the order written: a Write whose result says it
+// wrote the file (a failed one, or one the user skipped, does not). Cursor's request context carries
+// the contents of these files (`file_contents`, by path), as the captured subagent runs show: each
+// file the agent wrote, and none it only read. StrReplace edits are not in the captured runs.
+function writtenFiles(hashes, readMessage) {
+  const pending = new Map();
+  const out = new Set();
+  for (const h of hashes) {
+    for (const w of writesOf(h, readMessage)) {
+      if (w.call) pending.set(w.call, w.path);
+      else if (pending.has(w.result)) {
+        const file = pending.get(w.result);
+        pending.delete(w.result);
+        if (w.wrote) out.add(file);
+      }
+    }
+  }
+  return [...out];
+}
+
+// A message's Write calls and their results, by its hash (a message file never changes): read once.
+const writesCache = new Map();
+const WRITES_CACHE_MAX = 100000;
+function writesOf(hash, readMessage) {
+  if (writesCache.has(hash)) return writesCache.get(hash);
+  const m = readMessage(hash);
+  const out = [];
+  for (const p of m && Array.isArray(m.content) ? m.content : []) {
+    if (p.type === 'tool-call' && p.toolName === 'Write' && p.args && typeof p.args.path === 'string') out.push({ call: p.toolCallId, path: p.args.path });
+    if (p.type === 'tool-result') out.push({ result: p.toolCallId, wrote: typeof p.result === 'string' && p.result.startsWith('Wrote contents to ') });
+  }
+  // A message not stored yet is read again later.
+  if (m) {
+    if (writesCache.size >= WRITES_CACHE_MAX) writesCache.clear();
+    writesCache.set(hash, out);
+  }
+  return out;
+}
+
+const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
+
+// The current contents of these files, read from disk now as Cursor's request context reads them:
+// { path: { id, bytes, mtimeMs, redacted? } }, the id the sha256 of the bytes read. The stored copy has
+// its credentials replaced (redact.cjs), as the parts do. A file that is gone is left out. A file with
+// the size and modification time it had in `last` (the files last recorded) is not read again.
+function writtenContents(dir, paths, last = {}) {
+  const out = {};
+  for (const p of paths) {
+    let text;
+    let stat;
+    try {
+      stat = fs.statSync(p);
+      if (!stat.isFile()) continue;
+      const before = last[p];
+      if (before && before.mtimeMs === stat.mtimeMs && before.bytes === stat.size) {
+        out[p] = before;
+        continue;
+      }
+      text = fs.readFileSync(p, 'utf8');
+    } catch {
+      continue;
+    }
+    const bytes = Buffer.from(text, 'utf8');
+    const id = sha256(bytes);
+    const clean = redactText(text);
+    const redacted = clean.count ? { count: clean.count } : undefined;
+    writeOnce(path.join(dir, 'context', partFile(id, redacted)), Buffer.from(clean.text, 'utf8'));
+    out[p] = { id, bytes: bytes.length, mtimeMs: stat.mtimeMs, ...(redacted ? { redacted } : {}) };
+  }
+  return out;
+}
+
+// The files last recorded for a chat: the latest entry with a files map.
+function lastFiles(previousSent) {
+  const last = [...(previousSent || [])].reverse().find((e) => e.files);
+  return last ? last.files : {};
+}
+
+function sameFiles(a, b) {
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((p) => b[p] && b[p].id === a[p].id);
 }
 
 function hasBlob(db, id) {
@@ -357,24 +548,49 @@ function chatSection(entry, contextDir) {
     + 'not verified against the bytes Cursor sent (see `cursor-context wire compare`).';
   const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)',
     [...(entry.dynamicRedacted ? [redactedNote(entry.dynamicRedacted, false), ''] : []), fenced(JSON.stringify(entry.dynamic, null, 2), 'json')].join('\n'))] : [];
-  return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
+  const files = entry.files && Object.keys(entry.files).length ? [`- Files the chat wrote, as they were on disk (${filesNote(entry.files)})`] : [];
+  return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...files, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));
+}
+
+// The files of an entry, for a line of text: paths and sizes.
+const filesNote = (files) => Object.entries(files).map(([p, f]) => `\`${html(p)}\`, ${f.bytes} bytes${f.redacted ? ', credentials redacted' : ''}`).join('; ');
+
+// A stored copy of a file the chat wrote (its text as recorded, with credentials replaced).
+function loadFile(dir, id) {
+  for (const redacted of [false, true]) {
+    const file = path.join(dir, 'context', partFile(id, redacted));
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+  }
+  return undefined;
 }
 
 // For the inspector panel: the latest recorded context of a chat, as a category of items.
 function panelCategory(dir, meta) {
-  const entry = [...((meta && meta.sentContext) || [])].reverse().find((e) => e.parts);
-  if (!entry) return undefined;
+  const list = [...((meta && meta.sentContext) || [])].reverse();
+  const entry = list.find((e) => e.parts);
+  // The files of the latest entry that records them (none: the files were deleted since).
+  const latestFiles = list.find((e) => e.files);
+  const withFiles = latestFiles && Object.keys(latestFiles.files).length ? latestFiles : undefined;
+  if (!entry && !withFiles) return undefined;
   const items = [];
   for (const kind of rc.PARTS) {
-    const p = entry.parts[kind] && loadPart(dir, kind, entry.parts[kind].id);
+    const p = entry && entry.parts[kind] && loadPart(dir, kind, entry.parts[kind].id);
     if (!p) continue;
     const md = renderPart(kind, p.part, { id: p.id, bytes: entry.parts[kind].bytes, redacted: entry.parts[kind].redacted });
     items.push({ id: `sent:${kind}`, label: `${KIND_LABEL[kind]} (${entry.parts[kind].items})`, kind: 'sent_context', text: md, estimatedTokens: Math.ceil(md.length / 4), characterCount: md.length });
   }
+  if (withFiles) {
+    for (const [file, f] of Object.entries(withFiles.files)) {
+      const text = loadFile(dir, f.id);
+      if (text === undefined) continue;
+      items.push({ id: `sent:file:${file}`, label: `File written: ${path.basename(file)}`, kind: 'sent_context', text: `${file}\n\n${fenced(text)}`, estimatedTokens: Math.ceil(text.length / 4), characterCount: text.length });
+    }
+  }
+  const at = (entry || withFiles).messageAt;
   return {
     id: 'sent_context', label: 'Sent with the request, rebuilt (not in the prompt)', estimatedTokens: 0, source: 'history',
-    note: `Rebuilt from their sources for the message at ${new Date(entry.messageAt).toISOString()}; not part of Cursor's context usage.`, items,
+    note: `Rebuilt from their sources at ${new Date(at).toISOString()}; not part of Cursor's context usage. Files are the ones the chat wrote, as they were on disk then; Cursor sends them only when it asks for the request context.`, items,
   };
 }
 
-module.exports = { LIVE_MS, record, loadPart, partStrings, renderPart, chatSection, panelCategory, KIND_LABEL };
+module.exports = { LIVE_MS, record, loadPart, loadFile, partStrings, renderPart, chatSection, panelCategory, KIND_LABEL, writtenFiles };

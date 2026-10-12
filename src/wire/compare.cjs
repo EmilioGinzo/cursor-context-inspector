@@ -107,7 +107,7 @@ function loadRecord(historyDir, chat, db) {
     if (!parts.has(id)) parts.set(id, sentContextLib.loadPart(historyDir, kind, id));
     return parts.get(id);
   };
-  const rec = { dir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), thinking, blob, sentContext: meta.sentContext || [], part };
+  const rec = { dir, historyDir, meta, seen: meta.seen || [], snapshots, latest: readJson(path.join(dir, 'latest.json'), undefined), thinking, blob, sentContext: meta.sentContext || [], part };
   if (db) rec.db = dbSide(db, meta.composerId);
   return rec;
 }
@@ -601,10 +601,12 @@ function recordedPartStrings(rec) {
   const ids = new Map();
   for (const e of rec.sentContext || []) for (const [kind, p] of Object.entries(e.parts || {})) ids.set(p.id, kind);
   const dynamic = (rec.sentContext || []).flatMap((e) => sentContextLib.partStrings(e.dynamic));
+  // The files the chat wrote, as recorded (Cursor's request context carries their contents).
+  const files = (rec.sentContext || []).flatMap((e) => Object.values(e.files || {}).map((f) => sentContextLib.loadFile(rec.historyDir, f.id)).filter((t) => t !== undefined));
   return [...[...ids].flatMap(([id, kind]) => {
     const p = rec.part(kind, id);
     return p ? sentContextLib.partStrings(p.part) : [];
-  }), ...new Set(dynamic)];
+  }), ...new Set(dynamic), ...files];
 }
 
 function textOf(m) {

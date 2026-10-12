@@ -28,6 +28,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const mcpConnections = require('./mcpConnections.cjs');
 const cp = require('node:child_process');
 
 const DEFAULT_APP_DIR = '/usr/share/cursor/resources/app';
@@ -668,16 +669,59 @@ function entries(dir) {
   return out;
 }
 
-// Cursor's built-in servers whose tools go in the request in full (inline): Cursor's AU.rFE in
-// cursor-agent-exec's request context. With the meta-tool descriptors on (Cursor sends them with
-// every request, in all 72 captured runs), the other servers' tools are listed by name only, and
-// read from their definition files when the model asks for them.
-const INLINE_MCP_SERVERS = new Set(['cursor-dev-control', 'cursor-ide-browser']);
+// Cursor's built-in servers whose tools go in the request in full (inline) when the meta-tool
+// descriptors are on (Cursor sends them with every request, in all 72 captured runs): the other
+// servers' tools are listed by name only, and read from their definition files when the model asks.
+// Which servers those are is a set in Cursor's bundle: `Ne=new Set([Oe,Me])`, exported as rFE by
+// cursor-agent-exec (its request context filters `h.rFE.has(e.serverIdentifier)`). It is read from
+// the bundle; the set below is what it held when this was written, used when the bundle does not say.
+const INLINE_MCP_SERVERS_FALLBACK = new Set(['cursor-dev-control', 'cursor-ide-browser']);
+const inlineCache = new Map();
+
+// { servers: Set of server identifiers, source: 'bundle' | 'fallback' }.
+function inlineMcpServers(appDir) {
+  if (inlineCache.has(appDir)) return inlineCache.get(appDir);
+  let found;
+  try {
+    found = parseInlineServers(read(path.join(appDir, 'extensions', 'cursor-agent-exec', 'dist', 'main.js')));
+  } catch {
+    /* no bundle here */
+  }
+  const out = found ? { servers: found, source: 'bundle' } : { servers: INLINE_MCP_SERVERS_FALLBACK, source: 'fallback' };
+  inlineCache.set(appDir, out);
+  return out;
+}
+
+// The identifiers of the set exported as rFE: the export names its variable, the variable is the
+// Set (defined after the export, in the same module), and its members are string constants
+// (defined before it, as `Oe="cursor-dev-control"`) or string literals. undefined when any is missing.
+function parseInlineServers(text) {
+  const exp = /[{,]rFE:\(\)=>([\w$]+)[,}]/.exec(text);
+  if (!exp) return undefined;
+  const name = exp[1].replace(/\$/g, '\\$');
+  const at = text.slice(exp.index).search(new RegExp(`[,\\s]${name}=new Set\\(\\[`));
+  if (at < 0) return undefined;
+  const setAt = exp.index + at;
+  const members = /\[([^\]]*)\]\)/.exec(text.slice(setAt))[1].split(',').map((s) => s.trim()).filter(Boolean);
+  const ids = members.map((m) => {
+    if (/^"[^"]+"$/.test(m)) return m.slice(1, -1);
+    const id = m.replace(/\$/g, '\\$');
+    const defs = [...text.slice(Math.max(0, setAt - 100000), setAt).matchAll(new RegExp(`[,\\s(]${id}="([^"]+)"`, 'g'))];
+    return defs.length ? defs[defs.length - 1][1] : undefined;
+  });
+  return ids.every(Boolean) && ids.length ? new Set(ids) : undefined;
+}
 
 // Tool annotations (readOnlyHint...) are not in the MCP folders: they come from the servers, and
 // Cursor keeps them only inside the meta-tool parts it stored (sentContext.cjs reads them).
 // env.toolAnnotations: Map of `${serverIdentifier}\n${toolName}` -> annotations_json, as sent.
 const annotationKey = (server, tool) => `${server}\n${tool}`;
+
+// The annotationKey of every tool in an MCP part's meta-tool descriptors (the ones annotated, if known).
+function annotationKeysOf(mcps) {
+  return ((mcps.mcp_meta_tool_options && mcps.mcp_meta_tool_options.mcp_descriptors) || [])
+    .flatMap((d) => (d.tools || []).map((t) => annotationKey(d.server_identifier, t.tool_name)));
+}
 
 function mcpsPart(env, workspacePaths) {
   const dir = projectDir(env, workspacePaths);
@@ -710,6 +754,15 @@ function mcpsPart(env, workspacePaths) {
     const plugin = /^plugin-/.test(n) ? pluginList.find((p) => n.startsWith(`plugin-${p.name}-`)) : undefined;
     return { folder, folderId: n, id: meta.serverIdentifier || n, name: meta.serverName || n, instructions, tools, plugin };
   });
+  // A server Cursor had not connected when the message was sent is still listed, with no tools and no
+  // instructions (mcpConnections.cjs: from Cursor's logs at the time).
+  const offline = folders.filter((s) => !mcpConnections.isConnected(env.connections, s.id));
+  for (const s of offline) {
+    s.tools = [];
+    s.instructions = undefined;
+  }
+  if (offline.length) env.notes.push(`MCP servers not connected when the message was sent, per Cursor's logs (sent with no tools or instructions): ${offline.map((s) => s.name).join(', ')}`);
+  else if (!env.connections && folders.length) env.notes.push('Cursor\'s MCP logs not read: every MCP server is taken as connected');
   // The order of the meta-tool descriptors and instructions is the order servers connected in, not on
   // disk: Cursor's own servers first, by name, then plugins (the one order seen in the wire matches).
   const servers = [...folders].sort((a, b) => (!!a.plugin - !!b.plugin) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -719,7 +772,7 @@ function mcpsPart(env, workspacePaths) {
     return a === undefined ? {} : { annotations_json: a };
   };
   return {
-    tools: servers.filter((s) => INLINE_MCP_SERVERS.has(s.id)).flatMap((s) => s.tools.map((t) => ({
+    tools: servers.filter((s) => (env.inlineServers || INLINE_MCP_SERVERS_FALLBACK).has(s.id)).flatMap((s) => s.tools.map((t) => ({
       name: `${s.id}-${t.name}`, provider_identifier: s.name, tool_name: t.name, description: t.description,
       input_schema_json: t.arguments === undefined ? undefined : JSON.stringify(t.arguments),
     }))),
@@ -768,8 +821,12 @@ function dynamicContext(env, workspacePaths) {
 // --- entry point ---------------------------------------------------------------------------
 
 // The environment the rebuild reads: Cursor's app (for ripgrep and gray-matter), the home folder.
-function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations } = {}) {
-  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, notes: [] };
+// connections: { server id: connected } when the message was sent (mcpConnections.connectionsAt), if known.
+function environment({ appDir = DEFAULT_APP_DIR, home = os.homedir(), cursorDataDir, pluginIds, toolAnnotations, connections } = {}) {
+  const env = { appDir, home, cursorDataDir: cursorDataDir || process.env.CURSOR_DATA_DIR || path.join(home, '.cursor'), pluginIds, toolAnnotations, connections, notes: [] };
+  const inline = inlineMcpServers(appDir);
+  env.inlineServers = inline.servers;
+  if (inline.source === 'fallback') env.notes.push('Cursor\'s bundle not read: the MCP servers sent inline are the built-in list');
   const rg = path.join(appDir, 'node_modules', '@vscode', 'ripgrep', 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (isFile(rg)) env.rg = rg;
   else env.notes.push('Cursor\'s ripgrep not found: rule files listed in sorted order, not Cursor\'s');
@@ -858,4 +915,4 @@ function stripJsonComments(text) {
 // Installed plugins: [{ name, marketplace, rev }] (the keys of env.pluginIds are `${name}-${rev}`).
 const installedPlugins = (env) => plugins(env).map(({ name, marketplace, rev }) => ({ name, marketplace, rev }));
 
-module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey };
+module.exports = { DEFAULT_APP_DIR, environment, buildParts, installedPlugins, workspaceFolders, parseMdc, walk, dedupeKey, projectDir, stripJsonComments, annotationKey, annotationKeysOf, mcpsPart, inlineMcpServers, parseInlineServers, INLINE_MCP_SERVERS_FALLBACK };

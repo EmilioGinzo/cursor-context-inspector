@@ -7,9 +7,10 @@
 // and 13 (their connection attempts had failed: see below).
 //
 // Evidence, per server, in time order (the log lines are in local time, as the machine's clock):
-//   "createClient completed for server: <id>, connected=... | statusType=..., success=..." in the workbench
-//     logs (window*/workbench.mcp.files.log, window*/mcp-server-<id>.workbench.log): the outcome of a client;
-//   "Successfully connected to streamableHttp server" and "Transient error connecting to streamableHttp
+//   "createClient completed for server: <id>, connected=true|false" in the workbench logs
+//     (window*/workbench.mcp.files.log, window*/mcp-server-<id>.workbench.log): the outcome of a client.
+//     "statusType=initializing, success=true" is not one: it comes before the outcome, which can be a failure;
+//   "Successfully connected to streamableHttp|stdio server" and "Transient error connecting to streamableHttp
 //     server" in <launch>/mcp-server-<id>.log: a connection's outcome (the server's own log);
 //   "stopped connection: <id>" (the MCP process logs): stopped, so not connected.
 // The last of that evidence before the time decides, if it is recent: a server that failed while Cursor
@@ -23,8 +24,8 @@ const path = require('node:path');
 
 const LAUNCH = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/;
 const LINE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3}) /;
-const OUTCOME = /createClient completed for server: ([^,\s]+), (?:connected=(true|false)|statusType=\w+, success=(true|false))/;
-const CONNECTED = /Successfully connected to streamableHttp server/;
+const OUTCOME = /createClient completed for server: ([^,\s]+), connected=(true|false)/;
+const CONNECTED = /Successfully connected to (?:streamableHttp|stdio) server/;
 const TRANSIENT = /Transient error connecting to streamableHttp server/;
 const STOPPED = /stopped connection: ([^\s,]+)/;
 // Launches to read: the latest ones that started before the time (an event before it is in one of them).
@@ -93,7 +94,7 @@ function evidence(logsDir, at) {
         if (!Number.isFinite(when) || when > at) continue;
         const outcome = OUTCOME.exec(line);
         const stopped = STOPPED.exec(line);
-        if (outcome) events.push({ at: when, server: outcome[1], up: (outcome[2] ?? outcome[3]) === 'true' });
+        if (outcome) events.push({ at: when, server: outcome[1], up: outcome[2] === 'true' });
         else if (own && CONNECTED.test(line)) events.push({ at: when, server: own[1], up: true });
         else if (own && TRANSIENT.test(line)) events.push({ at: when, server: own[1], up: false });
         else if (stopped) events.push({ at: when, server: stopped[1], up: false });

@@ -539,6 +539,9 @@ test('the files the chat wrote are kept as they are on disk: once per change, ev
   assert.strictEqual(fs.readFileSync(path.join(dir, 'context', `${sha('first draft\n')}.bin`), 'utf8'), 'first draft\n');
   // The file changes after the message: its new contents are recorded, in an entry of their own, once.
   write(file, 'second draft\n');
+  // A whole second: the time set again below is the same to the sub-millisecond.
+  const mtime = new Date(2026, 0, 1);
+  fs.utimesSync(file, mtime, mtime);
   save('c', Date.now(), [user('one'), ...wrote('t1', file)]);
   history.recordChat(db, 'c', dir, undefined, options);
   history.recordChat(db, 'c', dir, undefined, options);
@@ -555,6 +558,21 @@ test('the files the chat wrote are kept as they are on disk: once per change, ev
   // The panel shows the files with the parts.
   const cat = sentContext.panelCategory(path.join(dir), meta());
   assert.ok(cat.items.some((i) => i.id === `sent:file:${file}` && i.text.includes('second draft')));
+  // Unchanged on disk (size and time): not read again. Same size, same time, other bytes: still the recorded ones.
+  write(file, 'SECOND draft\n');
+  fs.utimesSync(file, mtime, mtime);
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  assert.strictEqual(meta().sentContext.length, 3);
+  // The file is deleted and a message sent: its entry has no files, nothing more is added, the panel shows none.
+  fs.rmSync(file);
+  save('c', Date.now(), [user('one'), ...wrote('t1', file), user('two'), user('three')]);
+  history.recordChat(db, 'c', dir, undefined, options);
+  history.recordChat(db, 'c', dir, undefined, options);
+  entries = meta().sentContext;
+  assert.strictEqual(entries.length, 4);
+  assert.deepStrictEqual(entries[3].files, {});
+  assert.ok(!sentContext.panelCategory(path.join(dir), meta()).items.some((i) => i.id.startsWith('sent:file:')));
 });
 
 test('a file the chat wrote with credentials in it is stored with them replaced', { skip: !haveCursor && 'needs Cursor\'s gray-matter' }, (t) => {
@@ -632,15 +650,17 @@ test('a server that connected again after its failure is connected; one that fai
     `${logTime(at - 60e3)} [warning] Transient error connecting to streamableHttp server: fetch failed`,
     `${logTime(at - 10e3)} [info] Successfully connected to streamableHttp server`,
   ].join('\n') + '\n');
-  // A client outcome of success after a failure in the workbench log; a failure a few seconds before the time.
+  // A stdio server stopped, then connected again.
+  write(path.join(launch, 'mcp-server-local.log'), `${logTime(at - 8e3)} [info] Successfully connected to stdio server\n`);
+  // A client that failed, then only began again (initializing is not an outcome); a failure a few seconds before the time.
   write(path.join(launch, 'window1', 'workbench.mcp.files.log'), [
     `${logTime(at - 50e3)} [error] [MCPService] createClient completed for server: flaky, connected=false, statusType=error, error=x`,
     `${logTime(at - 40e3)} [info] [MCPService] createClient completed for server: flaky, statusType=initializing, success=true`,
   ].join('\n') + '\n');
   write(path.join(launch, 'mcp-server-down.log'), `${logTime(at - 5e3)} [warning] Transient error connecting to streamableHttp server: fetch failed\n`);
-  write(path.join(launch, 'mcpprocess.log'), `${logTime(at - 4e3)} [info] stopped connection: stopped\n`);
+  write(path.join(launch, 'mcpprocess.log'), `${logTime(at - 20e3)} [info] stopped connection: local\n${logTime(at - 4e3)} [info] stopped connection: stopped\n`);
   const connections = mcpConnections.connectionsAt(logs, at);
-  assert.deepStrictEqual([...connections].sort(), [['back', true], ['down', false], ['flaky', true], ['stopped', false]]);
+  assert.deepStrictEqual([...connections].sort(), [['back', true], ['down', false], ['flaky', false], ['local', true], ['stopped', false]]);
 });
 
 test('a server is connected at a time when the last connection evidence before it says so', (t) => {

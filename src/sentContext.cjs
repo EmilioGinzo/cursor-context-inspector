@@ -241,7 +241,7 @@ function rebuild(folders, options, cache, db, dir, at) {
 }
 
 // Called by the recorder for a new snapshot of a (root) chat. Returns the entry to add to
-// meta.sentContext, or undefined. options: { enabled, now, maxAgeMs, appDir, home, cache }.
+// meta.sentContext, or undefined. options: { enabled, now, maxAgeMs, appDir, home, cursorLogsDir, cache }.
 // The entries to add to meta.sentContext: one per send time of the new user messages (a message is
 // matched with the parts as they were when it was sent: see sendTimes), and one with no message when
 // only the files the chat wrote changed. input.previousSent: the chat's entries so far (the files last
@@ -253,8 +253,9 @@ function record({ dir, composer, composerId, hashes, seenBefore, readMessage, us
   if (now - composer.lastUpdatedAt > maxAge) return [];
   const messages = newUserMessages(hashes, seenBefore, readMessage, userBlocks);
   // The files the chat wrote, as they are on disk now: recorded again when they change, even with no new message.
-  const written = writtenContents(dir, writtenFiles(hashes, readMessage));
-  const changed = !sameFiles(written, lastFiles(previousSent));
+  const last = lastFiles(previousSent);
+  const written = writtenContents(dir, writtenFiles(hashes, readMessage), last);
+  const changed = !sameFiles(written, last);
   if (!messages.length && !changed) return [];
   if (!messages.length) return [{ messages: [], messageAt: composer.lastUpdatedAt, rebuiltAt: now, source: 'rebuilt', files: written }];
   const folders = sources.workspaceFolders(composer.workspaceIdentifier);
@@ -283,7 +284,8 @@ function userBubbles(db, composerId) {
   if (!db || !composerId) return out;
   let rows = [];
   try {
-    rows = db.prepare('SELECT value FROM cursorDiskKV WHERE key LIKE ?').all(`bubbleId:${composerId}:%`);
+    // A key range, not LIKE: LIKE ignores case, so it cannot use the key index and reads the whole table.
+    rows = db.prepare('SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ?').all(`bubbleId:${composerId}:`, `bubbleId:${composerId};`);
   } catch {
     return out;
   }
@@ -313,7 +315,7 @@ function userText(m) {
 function messageEntry({ dir, db, options, folders, written, messages, at }) {
   const built = rebuild(folders, options, options.cache, db, dir, at);
   const entry = { messages, messageAt: at, rebuiltAt: built.at, source: 'rebuilt', workspaceFolders: folders };
-  if (Object.keys(written).length) entry.files = written;
+  entry.files = written;
   if (built.error) return { ...entry, error: redactValue(built.error).value };
   entry.parts = {};
   entry.storedByCursor = [];
@@ -346,31 +348,56 @@ function writtenFiles(hashes, readMessage) {
   const pending = new Map();
   const out = new Set();
   for (const h of hashes) {
-    const m = readMessage(h);
-    if (!m || !Array.isArray(m.content)) continue;
-    for (const p of m.content) {
-      if (p.type === 'tool-call' && p.toolName === 'Write' && p.args && typeof p.args.path === 'string') pending.set(p.toolCallId, p.args.path);
-      if (p.type === 'tool-result' && pending.has(p.toolCallId)) {
-        const file = pending.get(p.toolCallId);
-        pending.delete(p.toolCallId);
-        if (typeof p.result === 'string' && p.result.startsWith('Wrote contents to ')) out.add(file);
+    for (const w of writesOf(h, readMessage)) {
+      if (w.call) pending.set(w.call, w.path);
+      else if (pending.has(w.result)) {
+        const file = pending.get(w.result);
+        pending.delete(w.result);
+        if (w.wrote) out.add(file);
       }
     }
   }
   return [...out];
 }
 
+// A message's Write calls and their results, by its hash (a message file never changes): read once.
+const writesCache = new Map();
+const WRITES_CACHE_MAX = 100000;
+function writesOf(hash, readMessage) {
+  if (writesCache.has(hash)) return writesCache.get(hash);
+  const m = readMessage(hash);
+  const out = [];
+  for (const p of m && Array.isArray(m.content) ? m.content : []) {
+    if (p.type === 'tool-call' && p.toolName === 'Write' && p.args && typeof p.args.path === 'string') out.push({ call: p.toolCallId, path: p.args.path });
+    if (p.type === 'tool-result') out.push({ result: p.toolCallId, wrote: typeof p.result === 'string' && p.result.startsWith('Wrote contents to ') });
+  }
+  // A message not stored yet is read again later.
+  if (m) {
+    if (writesCache.size >= WRITES_CACHE_MAX) writesCache.clear();
+    writesCache.set(hash, out);
+  }
+  return out;
+}
+
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
 // The current contents of these files, read from disk now as Cursor's request context reads them:
-// { path: { id, bytes, redacted? } }, the id the sha256 of the bytes read. The stored copy has its
-// credentials replaced (redact.cjs), as the parts do. A file that is gone is left out.
-function writtenContents(dir, paths) {
+// { path: { id, bytes, mtimeMs, redacted? } }, the id the sha256 of the bytes read. The stored copy has
+// its credentials replaced (redact.cjs), as the parts do. A file that is gone is left out. A file with
+// the size and modification time it had in `last` (the files last recorded) is not read again.
+function writtenContents(dir, paths, last = {}) {
   const out = {};
   for (const p of paths) {
     let text;
+    let stat;
     try {
-      if (!fs.statSync(p).isFile()) continue;
+      stat = fs.statSync(p);
+      if (!stat.isFile()) continue;
+      const before = last[p];
+      if (before && before.mtimeMs === stat.mtimeMs && before.bytes === stat.size) {
+        out[p] = before;
+        continue;
+      }
       text = fs.readFileSync(p, 'utf8');
     } catch {
       continue;
@@ -380,7 +407,7 @@ function writtenContents(dir, paths) {
     const clean = redactText(text);
     const redacted = clean.count ? { count: clean.count } : undefined;
     writeOnce(path.join(dir, 'context', partFile(id, redacted)), Buffer.from(clean.text, 'utf8'));
-    out[p] = { id, bytes: bytes.length, ...(redacted ? { redacted } : {}) };
+    out[p] = { id, bytes: bytes.length, mtimeMs: stat.mtimeMs, ...(redacted ? { redacted } : {}) };
   }
   return out;
 }
@@ -540,7 +567,9 @@ function loadFile(dir, id) {
 function panelCategory(dir, meta) {
   const list = [...((meta && meta.sentContext) || [])].reverse();
   const entry = list.find((e) => e.parts);
-  const withFiles = list.find((e) => e.files && Object.keys(e.files).length);
+  // The files of the latest entry that records them (none: the files were deleted since).
+  const latestFiles = list.find((e) => e.files);
+  const withFiles = latestFiles && Object.keys(latestFiles.files).length ? latestFiles : undefined;
   if (!entry && !withFiles) return undefined;
   const items = [];
   for (const kind of rc.PARTS) {

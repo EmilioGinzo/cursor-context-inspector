@@ -10,7 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const frames = require('./frames.cjs');
-const protobuf = require('./protobuf.cjs');
+const protobuf = require('../protobuf.cjs');
 
 function defaultRoot() {
   return process.env.CURSOR_WIRE_DIR || path.join(os.homedir(), '.cursor-wire');

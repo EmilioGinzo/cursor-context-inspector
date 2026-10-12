@@ -26,7 +26,7 @@
 
 const crypto = require('node:crypto');
 const flowsLib = require('./flows.cjs');
-const protobuf = require('./protobuf.cjs');
+const protobuf = require('../protobuf.cjs');
 
 const AGENT = 'agent.v1.AgentService';
 const RUN_RPCS = new Set(['Run', 'RunSSE', 'RunPoll']);

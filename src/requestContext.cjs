@@ -16,7 +16,7 @@
 // writer: fields by number, proto3 defaults left out) and decode.
 
 const crypto = require('node:crypto');
-const protobuf = require('./wire/protobuf.cjs');
+const protobuf = require('./protobuf.cjs');
 
 const PARTS = ['rules', 'skills', 'subagents', 'mcps'];
 

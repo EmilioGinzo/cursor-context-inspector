@@ -20,8 +20,8 @@ const protobuf = require('./protobuf.cjs');
 
 const PARTS = ['rules', 'skills', 'subagents', 'mcps'];
 
-// Field tables in the shape of src/wire/schema.cjs, in Cursor's declaration order.
-// Extracted from Cursor 3.x (agent.v1); the wire tests check them against captured bytes.
+// Field tables in the schema shape protobuf.cjs reads, in Cursor's declaration order.
+// Extracted from Cursor 3.x (agent.v1).
 const f = (no, name, kind, T, more = {}) => ({ no, name, kind, T, repeated: false, oneof: null, opt: false, ...more });
 const str = (no, name, more) => f(no, name, 'scalar', 9, more);
 const bool = (no, name, more) => f(no, name, 'scalar', 8, more);

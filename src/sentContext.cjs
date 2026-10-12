@@ -11,8 +11,7 @@
 //
 // Cursor keeps none of it, so the parts are rebuilt from their sources (contextSources.cjs) when
 // the recorder sees a new user message, shortly after it was sent. A part is only "what Cursor
-// sent" when its sha256 is one Cursor used: `cursor-context wire compare` checks the ids against
-// captured traffic; `storedByCursor` lists parts Cursor itself kept in agentKv under that id.
+// sent" when its sha256 is one Cursor used; `storedByCursor` lists parts Cursor itself kept in agentKv under that id.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -313,7 +312,7 @@ function ruleSummary(r) {
 function renderPart(kind, part, { id, bytes, redacted }) {
   const out = [`# ${KIND_LABEL[kind]} sent with a request`, '',
     `Part \`${id}\` (sha256), ${bytes} bytes. Rebuilt from its sources the way Cursor's client builds it; `
-      + 'it is what Cursor sent only where this id is one Cursor used (`cursor-context wire compare` checks it against captured traffic).', ''];
+      + 'it is what Cursor sent only where this id is one Cursor used.', ''];
   if (redacted) out.push(redactedNote(redacted), '');
   const section = (title, items, summary) => {
     if (!items || !items.length) return;
@@ -354,7 +353,7 @@ function chatSection(entry, contextDir) {
     return `- [${KIND_LABEL[k]}](${contextDir}/${p.id}.md): ${p.items} items, ${p.bytes} bytes, \`${p.id.slice(0, 12)}\`${kept}${redacted}`;
   });
   const how = `Rebuilt from the rule, skill, agent and MCP files ${lag >= 0 ? `${lag} s after` : 'around'} the message; `
-    + 'not verified against the bytes Cursor sent (see `cursor-context wire compare`).';
+    + 'not verified against the bytes Cursor sent.';
   const dynamic = entry.dynamic ? ['', details('Environment and git repositories (rebuilt; sent inline with every request)',
     [...(entry.dynamicRedacted ? [redactedNote(entry.dynamicRedacted, false), ''] : []), fenced(JSON.stringify(entry.dynamic, null, 2), 'json')].join('\n'))] : [];
   return details('Context sent with this message, rebuilt (not in the prompt)', [how, '', ...lines, ...(entry.notes || []).map((n) => `- Note: ${html(n)}`), ...dynamic].join('\n'));

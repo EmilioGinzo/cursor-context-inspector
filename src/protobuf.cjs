@@ -4,7 +4,7 @@
 // fields the schema does not know, values with an unexpected wire type and bytes
 // after a parse error are all kept, under `_unknown` / `_error`.
 //
-// Schema shape (see src/wire/schema.cjs): { messages: { "pkg.Type": { fields: [
+// Schema shape: { messages: { "pkg.Type": { fields: [
 //   { no, name, kind: scalar|enum|message|map, T, K?, V?, repeated, oneof, opt } ] } }, enums: {...} }
 // T for scalars is protobuf-es ScalarType. A field whose type the extractor could not resolve
 // has T: null (and maybe kind: null); its values are decoded schema-less, under `_unknown`

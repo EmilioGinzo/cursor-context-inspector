@@ -294,9 +294,9 @@ are not counted (no captured run shows them in `file_contents`).
 A rebuilt part is what Cursor sent only when their sha256 match.
 `storedByCursor` in `meta.json` lists parts Cursor itself kept a copy of
 under the same id. Which MCP servers were connected when the message was sent is
-read from Cursor's logs (`~/.config/Cursor/logs`): each server's own log says when
-it connected or failed to, and the workbench logs say when a client was created
-or failed; the last of those before the message decides, and a failure counts only
+read from Cursor's logs (the folder of its launches, above the extension's own log):
+each server's own log says when it connected or failed to, and the workbench logs
+say when a client connected or failed (not when one began); the last of those before the message decides, and a failure counts only
 for three minutes after it (Cursor retries a server that is down, but does not log
 its recovery). A server that was not connected is listed without its tools or
 instructions, as the captured requests show, and the note says which; a server the

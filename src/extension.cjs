@@ -71,6 +71,7 @@ function startRecorder(context) {
         db = db || store.openDatabase(dbPath);
         backfilling = !!history.tick(db, historyDir(), {
           backfillDays: settings().get('historyBackfillDays'),
+          detail: settings().get('historyDetail'),
           // Rebuilt with Cursor's own ripgrep and gray-matter.
           sentContext: { enabled: true, appDir: vscode.env.appRoot },
         }).backfilling;
@@ -103,7 +104,7 @@ async function recordAll(context) {
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Recording all chat history…' }, async () => {
     const db = store.openDatabase(databasePath(context));
     try {
-      const { recorded } = history.recordUpdatedSince(db, historyDir(), 0);
+      const { recorded } = history.recordUpdatedSince(db, historyDir(), 0, { detail: settings().get('historyDetail') });
       vscode.window.showInformationMessage(`Recorded ${recorded} chat snapshot(s) in ${historyDir()}.`);
     } finally {
       db.close();

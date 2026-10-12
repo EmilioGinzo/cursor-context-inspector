@@ -843,3 +843,68 @@ test('the prompt of the model call after a replaced tool result is recorded with
   assert.strictEqual(replaced[0].before, 4);
   assert.deepStrictEqual(replaced[0].messages, [hashOf(sys), hashOf(first), hashOf(call), hashOf(oldResult)]);
 });
+
+// A chat with a bit of everything the levels tell apart: a model call with a tool result, the model's
+// readable thinking, a summarized exchange, and a reply interrupted by the next prompt.
+function detailedChat() {
+  const t = setup();
+  const user = { role: 'user', content: [{ type: 'text', text: '<user_query>\nfix the bug\n</user_query>' }] };
+  const read = { role: 'assistant', content: [{ type: 'redacted-reasoning', data: 'AAAA' }, { type: 'tool-call', toolCallId: 't1', toolName: 'Read', args: {} }] };
+  const readResult = { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'Read', result: 'const a = 1;' }] };
+  const interrupted = { role: 'assistant', content: [{ type: 'text', text: 'Halfway through the fix.' }] };
+  const second = { role: 'user', content: 'second question' };
+  t.save(1000, [sys, summary, user, read, readResult], { archive: [first, answer], turns: [[step.thinking('The bug is in a.js.'), callStep('t1')]] });
+  t.db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`agentKv:blob:${hashOf(interrupted)}`, Buffer.from(JSON.stringify(interrupted)));
+  t.db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('bubbleId:chat-1:reply-1', JSON.stringify({ type: 2, text: 'Halfway through the fix.' }));
+  t.save(2000, [sys, summary, user, read, readResult, second], { archive: [first, answer], turns: [[step.thinking('The bug is in a.js.'), callStep('t1')]] });
+  return { ...t, prompt: [sys, summary, user, read, readResult, second], messages: [first, answer, sys, summary, user, read, readResult, second], interrupted };
+}
+const chatFiles = (dir) => fs.readdirSync(path.join(dir, 'chats', 'History chat')).sort();
+
+test('historyDetail conversation keeps the messages and chat.md, and does not search the store', () => {
+  const { db, dir, messages } = detailedChat();
+  history.recordUpdatedSince(db, dir, 0, { detail: 'conversation' });
+  assert.deepStrictEqual(chatFiles(dir), ['chat.md', 'latest.json', 'meta.json']);
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8'));
+  assert.deepStrictEqual(meta.seen, messages.map(hashOf), 'summarized messages too, but not the interrupted reply');
+  assert.strictEqual(meta.snapshots, 0);
+  assert.strictEqual(meta.scannedCalls, undefined, 'the calls stay to be looked up at full');
+  assert.strictEqual(meta.scannedReplies, undefined);
+  assert.ok(!fs.existsSync(path.join(dir, require('../src/storeIndex.cjs').FILE)), 'the store is not indexed');
+  assert.match(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8'), /second question/);
+});
+
+test('historyDetail standard adds thinking, transcript.md and a snapshot per update, not per model call', () => {
+  const { db, dir } = detailedChat();
+  history.recordUpdatedSince(db, dir, 0, { detail: 'standard' });
+  assert.deepStrictEqual(chatFiles(dir), ['chat.md', 'latest.json', 'meta.json', 'snapshots', 'thinking.json', 'transcript.md']);
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'chats', 'History chat', 'snapshots')), ['2000.json']);
+  assert.match(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'chat.md'), 'utf8'), /The bug is in a\.js\./);
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'transcript.md'), 'utf8'), /Halfway through the fix/);
+});
+
+test('a chat recorded below full gets the full detail on its next update at full; nothing recorded is removed', () => {
+  const { db, dir, save, prompt, interrupted } = detailedChat();
+  history.recordUpdatedSince(db, dir, 0, { detail: 'conversation' });
+  const third = { role: 'user', content: 'third question' };
+  save(3000, [...prompt, third], { archive: [first, answer], turns: [[step.thinking('The bug is in a.js.'), callStep('t1')]] });
+  history.recordUpdatedSince(db, dir, 2000);
+  assert.ok(chatFiles(dir).includes('thinking.json') && chatFiles(dir).includes('transcript.md'));
+  const after = JSON.parse(fs.readFileSync(path.join(dir, 'chats', 'History chat', 'meta.json'), 'utf8'));
+  assert.ok(after.seen.includes(hashOf(interrupted)), 'the interrupted reply is looked for now');
+  assert.deepStrictEqual(after.scannedCalls, ['t1']);
+
+  // Back down: what full recorded stays.
+  save(4000, [...prompt, third, { role: 'user', content: 'fourth question' }], { archive: [first, answer] });
+  history.recordUpdatedSince(db, dir, 3000, { detail: 'conversation' });
+  assert.ok(chatFiles(dir).includes('thinking.json') && chatFiles(dir).includes('transcript.md'));
+  assert.ok(!fs.readdirSync(path.join(dir, 'chats', 'History chat', 'snapshots')).some((f) => f.startsWith('4000')));
+});
+
+test('a tick below full does not read the store into its index, and records at once', () => {
+  const { db, dir } = detailedChat();
+  const result = history.tick(db, dir, { detail: 'standard' });
+  assert.strictEqual(result.storeIndexed, false);
+  assert.strictEqual(result.recorded, 1);
+  assert.ok(!fs.existsSync(path.join(dir, require('../src/storeIndex.cjs').FILE)));
+});

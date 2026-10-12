@@ -138,6 +138,7 @@ All settings are under **Settings → Extensions → Agent Context Inspector**.
 | `cursorContextInspector.showStatusBarItem` | `true` | Show the **Context** button in the status bar. |
 | `cursorContextInspector.recordHistory` | `true` | Keep a local history of agent sessions (see below). |
 | `cursorContextInspector.historyDirectory` | `""` | Where history is stored. Empty means `~/.cursor-context-history`. |
+| `cursorContextInspector.historyDetail` | `"full"` | How much the history records: `conversation`, `standard` or `full` (see [Detail levels](#detail-levels)). |
 | `cursorContextInspector.historyBackfillDays` | `0` | Also record older chats updated in this many past days; `0` records every chat Cursor still has. |
 
 ## Session history
@@ -184,6 +185,24 @@ store has been read up to date, so the lookups below see every message.
   chats; set `historyBackfillDays` to limit it.
 - **Commands:** **Record History of All Chats** records everything at once;
   **Open Session History Folder** opens the folder.
+
+### Detail levels
+
+`historyDetail` sets how much is recorded. Each level keeps everything the one
+above it keeps:
+
+| Level | Records |
+| --- | --- |
+| `conversation` | Every prompt message (`blobs/`, `meta.json`), including the ones summarization dropped, and `chat.md`. `latest.json` too: it marks what the recorder has seen. No thinking in `chat.md`. |
+| `standard` | Also `thinking.json` (and the thinking in `chat.md`), `transcript.md`, and one snapshot per chat update (`snapshots/<time>.json`). |
+| `full` (default) | Also the states before each update (`snapshots/<lastUpdatedAt>-<n>.json`), the context sent beside the prompt (`context/`, `sentContext`), and the messages only Cursor's store has: replaced tool results and interrupted replies. Only this level reads the store into `.store-index.sqlite`. |
+
+A change applies from the next tick, to what is recorded from then on. Nothing
+already recorded is deleted. After raising the level, a chat's `thinking.json`
+and `transcript.md` are written whole the next time it changes, and the tool
+calls and replies a lower level did not look up are looked up then; the
+snapshots and sent context of the updates recorded at the lower level are not
+recovered.
 
 ### Thinking
 

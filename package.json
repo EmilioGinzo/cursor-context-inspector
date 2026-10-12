@@ -76,6 +76,21 @@
           "default": "",
           "description": "Where session history is stored. Empty = ~/.cursor-context-history."
         },
+        "cursorContextInspector.historyDetail": {
+          "type": "string",
+          "enum": [
+            "conversation",
+            "standard",
+            "full"
+          ],
+          "enumDescriptions": [
+            "The messages and the readable conversation (chat.md) only.",
+            "Also the agent's readable thinking, the raw transcript.md and a token-breakdown snapshot per chat update.",
+            "Everything: also a snapshot per model call and turn end, the context sent outside the prompt (rules, skills, MCP tools), and replaced tool results and interrupted replies found in Cursor's store."
+          ],
+          "default": "full",
+          "description": "How much detail the session history records. Applies to what is recorded from now on; detail already recorded is kept."
+        },
         "cursorContextInspector.historyBackfillDays": {
           "type": "number",
           "default": 0,

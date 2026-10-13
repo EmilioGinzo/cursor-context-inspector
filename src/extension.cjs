@@ -55,7 +55,8 @@ function readMeta(composerId) {
 }
 
 // Snapshot changed chats every 30 s, and as soon as an agent turn ends (Cursor's stop hook);
-// one window records, the others skip. Older chats are caught up in small batches, every 5 s until done.
+// one window records, the others skip. Older chats, and the store's index, are caught up in small batches,
+// every 5 s until done.
 function startRecorder(context) {
   const enabled = settings().get('recordHistory');
   const onStop = enabled && settings().get('recordOnAgentStop');
@@ -77,12 +78,13 @@ function startRecorder(context) {
       if (stat.mtimeMs !== lastWrite || backfilling) {
         lastWrite = stat.mtimeMs;
         db = db || store.openDatabase(dbPath);
-        backfilling = !!history.tick(db, historyDir(), {
+        const result = history.tick(db, historyDir(), {
           backfillDays: settings().get('historyBackfillDays'),
           detail: settings().get('historyDetail'),
           // Rebuilt with Cursor's own ripgrep and gray-matter.
           sentContext: { enabled: true, appDir: vscode.env.appRoot, cursorLogsDir: cursorLogsDir(context) },
-        }).backfilling;
+        });
+        backfilling = !!(result.backfilling || result.indexing);
       }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);

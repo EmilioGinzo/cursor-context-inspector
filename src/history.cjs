@@ -874,7 +874,8 @@ const indexWrittenAt = new Map();
 // Each step stops at its time budget and resumes on the next tick. Nothing is recorded until the store's
 // rows have all been read once, so the lookups see them; when they are read again (index.advance), the
 // chats are recorded meanwhile, and a lookup that misses waits (settle). Returns `backfilling` while older
-// chats remain, and `indexing` while the store's rows are being read.
+// chats remain, `indexing` while the store's rows are being read, and `behind` when the deadline left
+// changed chats for the next tick.
 // sentContext: options for sentContext.record ({ enabled, appDir }); rebuilt once per tick.
 // clock: the time now (Date.now). budgetMs: { index, record } (BUDGET_MS). detail: how much is recorded (DETAIL).
 function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS, detail } = {}) {
@@ -893,6 +894,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   let migrated = false;
   let pending = { ...(state.pending || {}) };
   let watermark = state.watermark;
+  let behind = false;
   const backfilling = !state.backfill.done;
   if (indexed.caughtUp || index.complete()) {
     // The chat list is read before the deadline is set: its read is not part of the chats' budget.
@@ -906,6 +908,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     const again = recordPending(db, dir, pending, now, sentOptions, clock, { deadline, index, saveIndex: false, detail });
     const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false, detail });
     watermark = result.watermark;
+    behind = result.more;
     recorded = again.recorded + result.recorded;
     pending = { ...again.pending };
     for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
@@ -927,7 +930,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
     writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind };
 }
 
 module.exports = { DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

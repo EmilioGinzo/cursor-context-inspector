@@ -168,6 +168,21 @@ test('a tick records nothing until the store is read, then records every chat', 
   assert.ok(fs.existsSync(path.join(dir, 'chats', 'chat a')));
 });
 
+test('a tick that runs out of time says it is behind, and the next records the rest', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  const now = Date.now();
+  history.tick(db, dir, { clock: () => now });
+  for (const [i, id] of ['a', 'b'].entries()) db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`composerData:${id}`, composerOf(`chat ${id}`, now + 1 + i, message));
+  const first = history.tick(db, dir, { clock: stepClock(), budgetMs: { index: Infinity, record: 0 } });
+  assert.strictEqual(first.recorded, 1);
+  assert.strictEqual(first.behind, true);
+  const second = history.tick(db, dir, { clock: stepClock(), budgetMs: { index: Infinity, record: 0 } });
+  assert.strictEqual(second.recorded, 1);
+  assert.strictEqual(second.behind, false);
+});
+
 test('a record stops at its deadline, after the chats that share its time, and resumes with the next', () => {
   const { db, dir } = setup();
   const message = { role: 'user', content: 'hi' };

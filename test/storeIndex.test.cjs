@@ -247,13 +247,37 @@ test('a record made while index.json is not due is listed at the next write', ()
   db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:b', composerOf('chat b', now, message));
   const second = history.tick(db, dir, { clock });
   assert.strictEqual(second.recorded, 1);
-  assert.strictEqual(second.indexStale, true, 'not due: index.json waits');
+  assert.ok(second.indexDueIn > 29000 && second.indexDueIn <= 30000, 'not due: index.json waits');
   const listed = () => JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).map((c) => c.composerId).sort();
   assert.deepStrictEqual(listed(), ['a']);
   now += 30000;
   const third = history.tick(db, dir, { clock });
-  assert.strictEqual(third.indexStale, false);
+  assert.strictEqual(third.indexDueIn, undefined);
   assert.deepStrictEqual(listed(), ['a', 'b']);
+});
+
+test('a window that takes the lock over writes index.json, and a failing write does not stop the record', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  const now = Date.now();
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', composerOf('chat a', now + 1, message));
+  history.tick(db, dir, { clock: () => now });
+  // Another window held the lock and recorded b, but left it out of index.json.
+  fs.writeFileSync(path.join(dir, 'index.json'), '[]');
+  fs.writeFileSync(path.join(dir, '.recorder.lock'), JSON.stringify({ pid: 999999999, at: now }));
+  const taken = history.tick(db, dir, { clock: () => now + 40000 });
+  assert.strictEqual(taken.indexDueIn, undefined);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).length, 1);
+
+  // index.json cannot be written: the tick still saves its state.
+  fs.rmSync(path.join(dir, 'index.json'));
+  fs.mkdirSync(path.join(dir, 'index.json'));
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:c', composerOf('chat c', now + 90000, message));
+  const failed = history.tick(db, dir, { clock: () => now + 100000 });
+  assert.strictEqual(failed.recorded, 1);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).watermark, now + 90000);
+  assert.ok(failed.indexDueIn > 0, 'tried again when due');
 });
 
 // The conversation state of a chat whose prompt is this one message (field 1: its blob hash).

@@ -865,10 +865,11 @@ function tryLock(dir, staleMs) {
   const now = Date.now();
   const held = readJson(file, undefined);
   if (held && held.pid !== process.pid && now - held.at < staleMs && alive(held.pid)) return false;
-  // Another window may have renamed folders while it held the lock.
+  // Another window may have renamed folders while it held the lock, and left records out of index.json.
   if (!held || held.pid !== process.pid) {
     ownersCache.clear();
     checkedFolders.clear();
+    indexStale.add(dir);
   }
   writeAtomic(file, JSON.stringify({ pid: process.pid, at: now }));
   return true;
@@ -962,15 +963,20 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     const due = !indexWrittenAt.has(dir) || now - indexWrittenAt.get(dir) >= INDEX_MS;
     if (recorded > 0) indexStale.add(dir);
     if (relayout || ended || requested.length || (indexStale.has(dir) && due)) {
-      writeIndex(dir);
+      // A failing write must not keep state.json from being saved: it is tried again when due.
+      try {
+        writeIndex(dir);
+        indexStale.delete(dir);
+      } catch (err) {
+        console.error('[context-inspector] could not write index.json:', err);
+      }
       indexWrittenAt.set(dir, now);
-      indexStale.delete(dir);
     }
   }
   if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
     writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind, requested, failed, indexStale: indexStale.has(dir) };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind, requested, failed, indexDueIn: indexStale.has(dir) ? Math.max(0, (indexWrittenAt.get(dir) || 0) + INDEX_MS - now) : undefined };
 }
 
 module.exports = { releaseLock, DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

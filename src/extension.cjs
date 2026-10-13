@@ -106,15 +106,16 @@ function startRecorder(context) {
       const dbPath = databasePath(context);
       const stat = fs.statSync(`${dbPath}-wal`, { throwIfNoEntry: false }) || fs.statSync(dbPath);
       if (stat.mtimeMs !== lastWrite || busy || waiting.length) {
-        lastWrite = stat.mtimeMs;
         db = db || store.openDatabase(dbPath);
         const result = history.tick(db, dir, {
           backfillDays: settings().get('historyBackfillDays'),
           record: waiting,
           ...recordOptions(context),
         });
+        // A store write another window was to record stays new here: if that window closes, this one records it.
+        if (!result.skipped) lastWrite = stat.mtimeMs;
         requests.answer(dir, result.requested || [], result.failed || {});
-        busy = !!(result.backfilling || result.indexing || result.behind);
+        busy = !!(result.backfilling || result.indexing || result.behind || result.indexStale);
         waiting = requests.waiting(dir);
       }
     } catch (err) {
@@ -149,6 +150,7 @@ function startRecorder(context) {
       unwatch.forEach((f) => f());
       if (db) db.close();
       storeIndex.close(dir);
+      history.releaseLock(dir);
     },
   };
 }

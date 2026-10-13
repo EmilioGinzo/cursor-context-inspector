@@ -219,6 +219,43 @@ test('the chats asked for count in what a tick recorded', () => {
   assert.strictEqual(history.tick(db, dir, { clock: () => now, record: ['late'] }).recorded, 1);
 });
 
+test('a lock held by a process that ended, or given up, is taken at once', () => {
+  const { db, dir } = setup();
+  const lock = path.join(dir, '.recorder.lock');
+  const { spawnSync } = require('node:child_process');
+  const ended = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
+  fs.writeFileSync(lock, JSON.stringify({ pid: Number(ended), at: Date.now() }));
+  assert.ok(!history.tick(db, dir).skipped, 'the lock of an ended process is stale');
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.ppid, at: Date.now() }));
+  assert.strictEqual(history.tick(db, dir).skipped, 'another window is recording');
+  history.releaseLock(dir);
+  assert.ok(fs.existsSync(lock), 'only its own lock is given up');
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  history.releaseLock(dir);
+  assert.ok(!fs.existsSync(lock));
+});
+
+test('a record made while index.json is not due is listed at the next write', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  let now = Date.now();
+  const clock = () => now;
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', composerOf('chat a', now + 1, message));
+  history.tick(db, dir, { clock });
+  now += 2;
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:b', composerOf('chat b', now, message));
+  const second = history.tick(db, dir, { clock });
+  assert.strictEqual(second.recorded, 1);
+  assert.strictEqual(second.indexStale, true, 'not due: index.json waits');
+  const listed = () => JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).map((c) => c.composerId).sort();
+  assert.deepStrictEqual(listed(), ['a']);
+  now += 30000;
+  const third = history.tick(db, dir, { clock });
+  assert.strictEqual(third.indexStale, false);
+  assert.deepStrictEqual(listed(), ['a', 'b']);
+});
+
 // The conversation state of a chat whose prompt is this one message (field 1: its blob hash).
 const stateOf = (message) => {
   const digest = crypto.createHash('sha256').update(JSON.stringify(message)).digest();

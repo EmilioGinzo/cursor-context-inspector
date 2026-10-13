@@ -842,12 +842,29 @@ function recordPending(db, dir, pending, now, sent, clock, { deadline = Infinity
 }
 
 // One recorder per machine: several Cursor windows share the history directory.
+// Whether process `pid` still runs (on this machine; another window's extension host).
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+// Gives the lock up if this process holds it (its window closes or reloads), so another window records at once.
+function releaseLock(dir) {
+  const file = path.join(dir, '.recorder.lock');
+  const held = readJson(file, undefined);
+  if (held && held.pid === process.pid) fs.rmSync(file, { force: true });
+}
+
 function tryLock(dir, staleMs) {
   const file = path.join(dir, '.recorder.lock');
   fs.mkdirSync(dir, { recursive: true });
   const now = Date.now();
   const held = readJson(file, undefined);
-  if (held && held.pid !== process.pid && now - held.at < staleMs) return false;
+  if (held && held.pid !== process.pid && now - held.at < staleMs && alive(held.pid)) return false;
   // Another window may have renamed folders while it held the lock.
   if (!held || held.pid !== process.pid) {
     ownersCache.clear();
@@ -868,6 +885,8 @@ const RESCAN = 1;
 const BUDGET_MS = { index: 120, record: 60 };
 const INDEX_MS = 30000;
 const indexWrittenAt = new Map();
+// Dirs whose index.json misses a record made while it was not due.
+const indexStale = new Set();
 
 // Called periodically. Reads the store in steps (storeIndex), then records chats updated since the last
 // tick, and catches up on older ones `backfillBatch` at a time: all of them, or the last `backfillDays`.
@@ -909,10 +928,13 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     const relayout = migrated || state.layout !== LAYOUT;
     if (relayout) rebuildTranscripts(db, dir, detail);
     const sentOptions = sent && { ...sent, cache: new Map() };
+    // The chats asked for whose lookups wait are retried like the others (recordPending).
+    const asked = {};
     for (const id of record) {
       try {
         recorded += recordChat(db, id, dir, undefined, { sentContext: sentOptions, clock, index, detail });
         requested.push(id);
+        if (unsettled(db, dir, id)) asked[id] = pending[id] || now;
       } catch (err) {
         console.error(`[context-inspector] could not record chat ${id}:`, err);
         failed[id] = String(err && err.message ? err.message : err);
@@ -923,7 +945,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     watermark = result.watermark;
     behind = result.more;
     recorded += again.recorded + result.recorded;
-    pending = { ...again.pending };
+    pending = { ...asked, ...again.pending };
     for (const id of Object.keys(result.unsettled)) pending[id] = pending[id] || now;
     if (!state.backfill.done) {
       const older = recordUpdatedSince(db, dir, state.backfill.from, { until: state.backfill.until, limit: backfillBatch, sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false, detail });
@@ -938,12 +960,17 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     // the backfill ends.
     const ended = backfilling && !!state.backfill.done;
     const due = !indexWrittenAt.has(dir) || now - indexWrittenAt.get(dir) >= INDEX_MS;
-    if (relayout || ended || requested.length || (recorded > 0 && due)) { writeIndex(dir); indexWrittenAt.set(dir, now); }
+    if (recorded > 0) indexStale.add(dir);
+    if (relayout || ended || requested.length || (indexStale.has(dir) && due)) {
+      writeIndex(dir);
+      indexWrittenAt.set(dir, now);
+      indexStale.delete(dir);
+    }
   }
   if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
     writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind, requested, failed };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind, requested, failed, indexStale: indexStale.has(dir) };
 }
 
-module.exports = { DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };
+module.exports = { releaseLock, DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

@@ -2,7 +2,7 @@
   "name": "context-inspector",
   "displayName": "Agent Context Inspector",
   "description": "See the exact text behind each part of Cursor's agent Context Usage, and keep a local history of agent sessions.",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "publisher": "local-tools",
   "private": true,
   "license": "MIT",
@@ -38,6 +38,11 @@
       {
         "command": "cursorContextInspector.openHistory",
         "title": "Open Session History Folder",
+        "category": "Context Inspector"
+      },
+      {
+        "command": "cursorContextInspector.recordFocusedChat",
+        "title": "Record Focused Chat Now",
         "category": "Context Inspector"
       },
       {

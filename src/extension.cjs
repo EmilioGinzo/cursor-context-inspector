@@ -96,6 +96,8 @@ function startRecorder(context) {
   let db;
   let lastWrite;
   let busy = true;
+  // Set while index.json misses a record: when its next write is due (ms).
+  let indexDueIn;
   let timer;
   const run = () => {
     clearTimeout(timer);
@@ -115,13 +117,15 @@ function startRecorder(context) {
         // A store write another window was to record stays new here: if that window closes, this one records it.
         if (!result.skipped) lastWrite = stat.mtimeMs;
         requests.answer(dir, result.requested || [], result.failed || {});
-        busy = !!(result.backfilling || result.indexing || result.behind || result.indexStale);
+        busy = !!(result.backfilling || result.indexing || result.behind);
+        indexDueIn = result.indexDueIn;
         waiting = requests.waiting(dir);
       }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);
     }
-    timer = setTimeout(run, busy || waiting.length ? 5000 : 30000);
+    const delay = busy || waiting.length ? 5000 : 30000;
+    timer = setTimeout(run, indexDueIn === undefined ? delay : Math.min(delay, indexDueIn + 100));
   };
   timer = setTimeout(run, 5000);
   // A turn ended: Cursor may write its last messages to its store just after the hook runs, so look again

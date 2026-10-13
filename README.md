@@ -139,6 +139,7 @@ All settings are under **Settings → Extensions → Agent Context Inspector**.
 | `cursorContextInspector.recordHistory` | `true` | Keep a local history of agent sessions (see below). |
 | `cursorContextInspector.historyDirectory` | `""` | Where history is stored. Empty means `~/.cursor-context-history`. |
 | `cursorContextInspector.historyDetail` | `"full"` | How much the history records: `conversation`, `standard` or `full` (see [Detail levels](#detail-levels)). |
+| `cursorContextInspector.recordOnAgentStop` | `true` | Record a chat as soon as its agent finishes, through a `stop` hook in `~/.cursor/hooks.json` (see below). |
 | `cursorContextInspector.historyBackfillDays` | `0` | Also record older chats updated in this many past days; `0` records every chat Cursor still has. |
 
 ## Session history
@@ -147,6 +148,17 @@ Every 30 s, if Cursor wrote anything, one Cursor window snapshots the chats
 that changed into `~/.cursor-context-history`. A chat whose agent is still
 running is checked again on every write until its run ends, so the record
 holds its final state even when Cursor stores it without a newer timestamp.
+
+The recorder does not wait for the next 30 s check when an agent finishes.
+On startup the extension adds a `stop` hook to `~/.cursor/hooks.json`, and
+keeps your own hooks. When an agent turn ends, Cursor runs the hook. The hook
+writes the turn (conversation id, status) to
+`.context-inspector-agent-stopped.json` in the history folder. The recorder
+watches that file and records within a second, then checks again after 3 s
+and 10 s, because Cursor can store the last messages just after the hook runs.
+If you set `recordOnAgentStop` to `false`, the hook is removed at the next
+Reload Window. If `hooks.json` is not valid JSON, the extension does not
+change it.
 
 Each step of the recorder has a time budget, so the editor is not held for
 long: a tick reads at most about 120 ms of Cursor's store (see

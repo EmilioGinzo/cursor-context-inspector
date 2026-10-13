@@ -11,8 +11,10 @@ const sentContext = require('./sentContext.cjs');
 const stopHook = require('./stopHook.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
+let focus;
 
 function activate(context) {
+  focus = new FocusTracker(context);
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.text = '$(layers) Context';
   status.tooltip = 'Inspect the text behind each part of the agent context';
@@ -24,6 +26,7 @@ function activate(context) {
     vscode.commands.registerCommand('cursorContextInspector.open', () => Inspector.show(context)),
     vscode.commands.registerCommand('cursorContextInspector.openHistory', () => openHistoryFolder()),
     vscode.commands.registerCommand('cursorContextInspector.recordAllHistory', () => recordAll(context)),
+    vscode.commands.registerCommand('cursorContextInspector.recordFocusedChat', () => recordFocused(context)),
   );
   startRecorder(context);
 }
@@ -36,18 +39,27 @@ function historyDir() {
   return settings().get('historyDirectory') || history.defaultHistoryDir();
 }
 
-// A chat's recorded meta.json, found through the history's index; undefined if not recorded.
+// A chat's entry in the history's index.json ({ composerId, path, subagents, ... }); undefined if not recorded.
+function findEntry(composerId) {
+  const find = (list) => {
+    for (const c of list) {
+      if (c.composerId === composerId) return c;
+      const sub = find(c.subagents || []);
+      if (sub) return sub;
+    }
+    return undefined;
+  };
+  try {
+    return find(JSON.parse(fs.readFileSync(path.join(historyDir(), 'index.json'), 'utf8')));
+  } catch {
+    return undefined;
+  }
+}
+
+// A chat's recorded meta.json; undefined if not recorded.
 function readMeta(composerId) {
   try {
-    const find = (list) => {
-      for (const c of list) {
-        if (c.composerId === composerId) return c;
-        const sub = find(c.subagents || []);
-        if (sub) return sub;
-      }
-      return undefined;
-    };
-    const entry = find(JSON.parse(fs.readFileSync(path.join(historyDir(), 'index.json'), 'utf8')));
+    const entry = findEntry(composerId);
     return entry && JSON.parse(fs.readFileSync(path.join(historyDir(), entry.path, 'meta.json'), 'utf8'));
   } catch {
     return undefined;
@@ -80,9 +92,7 @@ function startRecorder(context) {
         db = db || store.openDatabase(dbPath);
         const result = history.tick(db, historyDir(), {
           backfillDays: settings().get('historyBackfillDays'),
-          detail: settings().get('historyDetail'),
-          // Rebuilt with Cursor's own ripgrep and gray-matter.
-          sentContext: { enabled: true, appDir: vscode.env.appRoot, cursorLogsDir: cursorLogsDir(context) },
+          ...recordOptions(context),
         });
         backfilling = !!(result.backfilling || result.indexing);
       }
@@ -109,6 +119,47 @@ function startRecorder(context) {
       storeIndex.close(dir);
     },
   });
+}
+
+// What the recorder records, from the settings.
+function recordOptions(context) {
+  return {
+    detail: settings().get('historyDetail'),
+    // Rebuilt with Cursor's own ripgrep and gray-matter.
+    sentContext: { enabled: true, appDir: vscode.env.appRoot, cursorLogsDir: cursorLogsDir(context) },
+  };
+}
+
+// Records the chat focused in this window, and its subagents, now.
+async function recordFocused(context) {
+  const db = store.openDatabase(databasePath(context));
+  try {
+    const id = await focus.chatId(db);
+    if (!id) {
+      vscode.window.showInformationMessage('No focused Cursor agent chat to record.');
+      return;
+    }
+    const recorded = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Recording the focused chat…' },
+      async () => {
+        // The record blocks this thread: let the notification show first.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const n = history.recordChat(db, id, historyDir(), new Set(), recordOptions(context));
+        history.writeIndex(historyDir());
+        return n;
+      },
+    );
+    const entry = findEntry(id);
+    const pick = await vscode.window.showInformationMessage(
+      recorded ? `Recorded ${recorded} new snapshot(s) of the focused chat.` : 'The focused chat is already recorded as it is now.',
+      ...(entry ? ['Open chat.md'] : []),
+    );
+    if (pick) await vscode.window.showTextDocument(vscode.Uri.file(path.join(historyDir(), entry.path, 'chat.md')));
+  } catch (err) {
+    vscode.window.showErrorMessage(`Recording the focused chat failed: ${err && err.message ? err.message : err}`);
+  } finally {
+    db.close();
+  }
 }
 
 // Cursor's logs folder (one folder per launch: <YYYYMMDDTHHMMSS>/), above this extension's own log
@@ -147,6 +198,38 @@ async function recordAll(context) {
       db.close();
     }
   });
+}
+
+// Tracks the chat focused in this window, for the inspector and for recording the focused chat.
+class FocusTracker {
+  constructor(context) {
+    this.context = context;
+    this.recentChatIds = []; // newest first, from live pane changes and stored focus
+    this.panes = undefined;
+    this.storedHead = undefined;
+  }
+
+  // The chat focused in this window. Cursor exposes only the open panes (in layout
+  // order) live; a chat that just joined them is the one the user switched to.
+  // The stored focus history fills in, but only after Cursor flushes it.
+  // Chats without saved context (new, empty) are skipped.
+  async chatId(db) {
+    let panes = [];
+    try {
+      panes = (await vscode.commands.executeCommand('composer.getOrderedSelectedComposerIds')) || [];
+    } catch {
+      // Not Cursor, or the command changed; fall back to stored focus only.
+    }
+    const stored = lastFocusedChatIds(this.context);
+    const bump = (id) => (this.recentChatIds = [id, ...this.recentChatIds.filter((r) => r !== id)]);
+    if (this.panes) panes.filter((id) => !this.panes.includes(id)).forEach(bump);
+    this.panes = panes;
+    if (this.storedHead !== undefined && stored[0] && stored[0] !== this.storedHead) bump(stored[0]);
+    this.storedHead = stored[0] || null;
+    const open = (id) => !panes.length || panes.includes(id);
+    const ordered = [...this.recentChatIds.filter(open), ...stored.filter(open), ...panes];
+    return ordered.find((id) => store.hasContext(db, id));
+  }
 }
 
 // This window's workspace storage (beside storageUri) records the chats focused in it.
@@ -202,9 +285,6 @@ class Inspector {
     this.chatId = undefined;
     this.ready = false;
     this.itemIndex = new Map();
-    this.recentChatIds = []; // newest first, from live pane changes and stored focus
-    this.panes = undefined;
-    this.storedHead = undefined;
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, 'Agent Context', vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -287,26 +367,8 @@ class Inspector {
     }
   }
 
-  // The chat focused in this window. Cursor exposes only the open panes (in layout
-  // order) live; a chat that just joined them is the one the user switched to.
-  // The stored focus history fills in, but only after Cursor flushes it.
-  // Chats without saved context (new, empty) are skipped.
   async focusedChatId(db) {
-    let panes = [];
-    try {
-      panes = (await vscode.commands.executeCommand('composer.getOrderedSelectedComposerIds')) || [];
-    } catch {
-      // Not Cursor, or the command changed; fall back to stored focus only.
-    }
-    const stored = lastFocusedChatIds(this.context);
-    const bump = (id) => (this.recentChatIds = [id, ...this.recentChatIds.filter((r) => r !== id)]);
-    if (this.panes) panes.filter((id) => !this.panes.includes(id)).forEach(bump);
-    this.panes = panes;
-    if (this.storedHead !== undefined && stored[0] && stored[0] !== this.storedHead) bump(stored[0]);
-    this.storedHead = stored[0] || null;
-    const open = (id) => !panes.length || panes.includes(id);
-    const ordered = [...this.recentChatIds.filter(open), ...stored.filter(open), ...panes];
-    return ordered.find((id) => store.hasContext(db, id));
+    return focus.chatId(db);
   }
 
   async reload({ refocus = false } = {}) {

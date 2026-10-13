@@ -91,12 +91,6 @@ function lastBlobAtOrBelow(db, rowid, from = 0) {
     ORDER BY rowid DESC LIMIT 1`).get(from, rowid);
 }
 
-// The rowid of the row with key `key`, or undefined.
-function rowidOf(db, key) {
-  const row = db.prepare('SELECT rowid AS rowid FROM cursorDiskKV WHERE key = ?').get(key);
-  return row ? row.rowid : undefined;
-}
-
 // Subagent chats are excluded by default; they are reached through their parent.
 function listComposers(db, limit = 60, { includeSubagents = false } = {}) {
   const rows = db.prepare(`
@@ -627,7 +621,6 @@ module.exports = {
   blobRows,
   maxRowid,
   lastBlobAtOrBelow,
-  rowidOf,
   messageText,
   ancestors,
   loadSubagents,

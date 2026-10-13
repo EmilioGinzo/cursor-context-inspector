@@ -195,7 +195,9 @@ store has been read up to date, so the lookups below see every message.
   for the largest histories). Chats opened but never sent are
   skipped. Expect the full history to take a few GB if you have thousands of
   chats; set `historyBackfillDays` to limit it.
-- **Commands:** **Record History of All Chats** records everything at once;
+- **Commands:** **Record Focused Chat Now** records the chat focused in this
+  window, and its subagents, at once, and offers to open its `chat.md`;
+  **Record History of All Chats** records everything at once;
   **Open Session History Folder** opens the folder.
 
 ### Detail levels

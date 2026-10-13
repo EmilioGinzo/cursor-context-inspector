@@ -169,7 +169,8 @@ long: a tick reads at most about 120 ms of Cursor's store (see
 `.store-index.sqlite` below) and records chats for about 60 ms, finishing
 the chat it has started (a chat with a large history can take longer than
 that). Whatever is left waits for the next tick. Nothing is recorded until the
-store has been read up to date, so the lookups below see every message.
+store has been read in full once, so the lookups below see every message;
+when it is read again, chats are recorded meanwhile and their lookups wait.
 
 | Path | Contents |
 | --- | --- |
@@ -184,7 +185,7 @@ store has been read up to date, so the lookups below see every message.
 | `blobs/<sha256>.json` | Each prompt message once, exactly as Cursor stored it; chats refer to them by hash (storage, not for reading). |
 | `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. `<sha256>.redacted.bin` when it held credentials, replaced (see [Context sent beside the prompt](#context-sent-beside-the-prompt)). |
 | `context/<sha256>.md` | The same part, readable: one collapsed section per rule, skill, subagent or tool. |
-| `index.json` | All recorded chats, newest first, each with its subagent tree. Written at most every 30 s while older chats are recorded, and when that ends. |
+| `index.json` | All recorded chats, newest first, each with its subagent tree. Written at most every 30 s while chats are recorded (a record made in between is listed at the next write, within 30 s), when the catch-up of older chats ends, and at once for a chat asked for by Record Focused Chat Now. |
 | `.store-index.sqlite` | An index of the message blobs in Cursor's store by the tool call ids they hold and the digests of their assistant texts, so a lookup of a replaced result or an interrupted reply is a query, not a read of the store. Built once, in steps, from every row of the store (about 8 s of work over a few minutes of ticks for a store of this size); it only gains entries. It keeps its place by the last message blob it read (Cursor never rewrites a blob, unlike the chat rows it replaces on every update): only when that blob is renumbered (VACUUM) or removed is the store read again, and chats are recorded meanwhile, their lookups waiting for the read. A blob Cursor wrote again and that a renumbering then put back at its old rowid would be missed; Cursor has not been seen to do either. A cache: deleting it costs a new read, not a record. |
 
 - **Folder names** follow the chat name, with characters that are not valid

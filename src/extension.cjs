@@ -67,8 +67,8 @@ function readMeta(composerId) {
 }
 
 // Snapshot changed chats every 30 s, and as soon as an agent turn ends (Cursor's stop hook);
-// one window records, the others skip. Older chats, and the store's index, are caught up in small batches,
-// every 5 s until done.
+// one window records, the others skip. Older chats, the store's index, and changed chats a tick had no time
+// for are caught up in small batches, every 5 s until done.
 function startRecorder(context) {
   const enabled = settings().get('recordHistory');
   const onStop = enabled && settings().get('recordOnAgentStop');
@@ -94,7 +94,7 @@ function startRecorder(context) {
           backfillDays: settings().get('historyBackfillDays'),
           ...recordOptions(context),
         });
-        backfilling = !!(result.backfilling || result.indexing);
+        backfilling = !!(result.backfilling || result.indexing || result.behind);
       }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);

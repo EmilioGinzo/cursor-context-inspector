@@ -8,6 +8,7 @@ const store = require('./cursorStore.cjs');
 const history = require('./history.cjs');
 const storeIndex = require('./storeIndex.cjs');
 const sentContext = require('./sentContext.cjs');
+const stopHook = require('./stopHook.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
 
@@ -53,15 +54,22 @@ function readMeta(composerId) {
   }
 }
 
-// Snapshot changed chats every 30 s; one window records, the others skip.
-// Older chats are caught up in small batches, every 5 s until done.
+// Snapshot changed chats every 30 s, and as soon as an agent turn ends (Cursor's stop hook);
+// one window records, the others skip. Older chats are caught up in small batches, every 5 s until done.
 function startRecorder(context) {
-  if (!settings().get('recordHistory')) return;
+  const enabled = settings().get('recordHistory');
+  const onStop = enabled && settings().get('recordOnAgentStop');
+  const dir = historyDir();
+  const hook = stopHook.syncHook({ historyDir: dir, enabled: onStop });
+  if (hook === 'unreadable') console.error(`[context-inspector] ${stopHook.defaultHooksFile()} is not valid JSON; the stop hook was not installed.`);
+  if (!enabled) return;
   let db;
   let lastWrite;
   let backfilling = true;
   let timer;
+  let stopTimers = [];
   const run = () => {
+    clearTimeout(timer);
     try {
       // Cursor commits through the WAL; unchanged mtime means no chat changed.
       const dbPath = databasePath(context);
@@ -82,7 +90,23 @@ function startRecorder(context) {
     timer = setTimeout(run, backfilling ? 5000 : 30000);
   };
   timer = setTimeout(run, 5000);
-  context.subscriptions.push({ dispose: () => { clearTimeout(timer); if (db) db.close(); storeIndex.close(historyDir()); } });
+  // Cursor may write the turn's last messages to its store just after the hook runs: look again a little later.
+  const signal = stopHook.signalFile(dir);
+  const onSignal = (now, before) => {
+    if (now.mtimeMs === before.mtimeMs) return;
+    stopTimers.forEach(clearTimeout);
+    stopTimers = [500, 3000, 10000].map((ms) => setTimeout(run, ms));
+  };
+  if (onStop) fs.watchFile(signal, { interval: 500 }, onSignal);
+  context.subscriptions.push({
+    dispose: () => {
+      clearTimeout(timer);
+      stopTimers.forEach(clearTimeout);
+      fs.unwatchFile(signal, onSignal);
+      if (db) db.close();
+      storeIndex.close(dir);
+    },
+  });
 }
 
 // Cursor's logs folder (one folder per launch: <YYYYMMDDTHHMMSS>/), above this extension's own log

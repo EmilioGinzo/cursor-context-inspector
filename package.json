@@ -2,7 +2,7 @@
   "name": "context-inspector",
   "displayName": "Agent Context Inspector",
   "description": "See the exact text behind each part of Cursor's agent Context Usage, and keep a local history of agent sessions.",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "publisher": "local-tools",
   "private": true,
   "license": "MIT",
@@ -74,12 +74,14 @@
         "cursorContextInspector.recordHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Keep a local history of agent sessions: every prompt message and a snapshot per chat update."
+          "description": "Keep a local history of agent sessions: every prompt message and a snapshot per chat update.",
+          "scope": "application"
         },
         "cursorContextInspector.historyDirectory": {
           "type": "string",
           "default": "",
-          "description": "Where session history is stored. Empty = ~/.cursor-context-history."
+          "description": "Where session history is stored. Empty = ~/.cursor-context-history.",
+          "scope": "application"
         },
         "cursorContextInspector.historyDetail": {
           "type": "string",
@@ -99,7 +101,8 @@
         "cursorContextInspector.recordOnAgentStop": {
           "type": "boolean",
           "default": true,
-          "description": "Record a chat as soon as the agent finishes its turn, through a stop hook this extension adds to ~/.cursor/hooks.json (your other hooks are kept). Off: the hook is removed and chats are recorded every 30 s only. Applies after Reload Window."
+          "description": "Record a chat as soon as the agent finishes its turn, through a stop hook this extension adds to ~/.cursor/hooks.json (your other hooks are kept). Off: the hook is removed and chats are recorded every 30 s only. Applies after Reload Window.",
+          "scope": "application"
         },
         "cursorContextInspector.historyBackfillDays": {
           "type": "number",
@@ -110,6 +113,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.cjs"
+    "test": "node --test test/*.test.cjs",
+    "vscode:uninstall": "node ./scripts/uninstall.cjs"
   }
 }

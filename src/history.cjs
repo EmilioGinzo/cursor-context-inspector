@@ -878,7 +878,9 @@ const indexWrittenAt = new Map();
 // changed chats for the next tick.
 // sentContext: options for sentContext.record ({ enabled, appDir }); rebuilt once per tick.
 // clock: the time now (Date.now). budgetMs: { index, record } (BUDGET_MS). detail: how much is recorded (DETAIL).
-function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS, detail } = {}) {
+// record: ids of chats recorded now, changed or not (the focused chat, asked for); `requested` returns the
+// ones recorded, and index.json is written for them.
+function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, sentContext: sent, clock = Date.now, budgetMs = BUDGET_MS, detail, record = [] } = {}) {
   if (!tryLock(dir, staleMs)) return { recorded: 0, skipped: 'another window is recording' };
   const stateFile = path.join(dir, 'state.json');
   const now = clock();
@@ -895,6 +897,7 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
   let pending = { ...(state.pending || {}) };
   let watermark = state.watermark;
   let behind = false;
+  const requested = [];
   const backfilling = !state.backfill.done;
   if (indexed.caughtUp || index.complete()) {
     // The chat list is read before the deadline is set: its read is not part of the chats' budget.
@@ -905,6 +908,14 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     const relayout = migrated || state.layout !== LAYOUT;
     if (relayout) rebuildTranscripts(db, dir, detail);
     const sentOptions = sent && { ...sent, cache: new Map() };
+    for (const id of record) {
+      try {
+        recorded += recordChat(db, id, dir, undefined, { sentContext: sentOptions, clock, index, detail });
+      } catch (err) {
+        console.error(`[context-inspector] could not record chat ${id}:`, err);
+      }
+      requested.push(id);
+    }
     const again = recordPending(db, dir, pending, now, sentOptions, clock, { deadline, index, saveIndex: false, detail });
     const result = recordUpdatedSince(db, dir, state.watermark, { sentContext: sentOptions, clock, deadline, index, chats, saveIndex: false, detail });
     watermark = result.watermark;
@@ -925,12 +936,12 @@ function tick(db, dir, { backfillDays = 0, backfillBatch = 50, staleMs = 90000, 
     // the backfill ends.
     const ended = backfilling && !!state.backfill.done;
     const due = !indexWrittenAt.has(dir) || now - indexWrittenAt.get(dir) >= INDEX_MS;
-    if (relayout || ended || (recorded > 0 && due)) { writeIndex(dir); indexWrittenAt.set(dir, now); }
+    if (relayout || ended || requested.length || (recorded > 0 && due)) { writeIndex(dir); indexWrittenAt.set(dir, now); }
   }
   if (!fs.existsSync(stateFile) || rescan || watermark !== state.watermark || JSON.stringify([state.backfill, pending]) !== before) {
     writeAtomic(stateFile, JSON.stringify({ watermark, layout: LAYOUT, rescan: RESCAN, backfill: state.backfill, pending }));
   }
-  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind };
+  return { recorded, watermark, migrated, backfilling: !state.backfill.done, pending: Object.keys(pending).length, indexed: indexed.watermark, storeIndexed: !!index && indexed.caughtUp, indexing: !indexed.caughtUp, behind, requested };
 }
 
 module.exports = { DETAIL, defaultHistoryDir, folderName, chatDirFor, recordChat, recordUpdatedSince, migrateLayout, rebuildTranscripts, tick, writeIndex, RETRY_ROWS };

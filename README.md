@@ -157,8 +157,12 @@ writes the turn (conversation id, status) to
 watches that file and records within a second, then checks again after 3 s
 and 10 s, because Cursor can store the last messages just after the hook runs.
 If you set `recordOnAgentStop` to `false`, the hook is removed at the next
-Reload Window. If `hooks.json` is not valid JSON, the extension does not
-change it.
+Reload Window, and uninstalling the extension removes it too. If `hooks.json`
+is not JSON of the shape Cursor reads (an object whose `hooks` holds arrays),
+the extension does not change it. A symlinked `hooks.json` is written through
+the link, and keeps its permissions. `recordHistory`, `historyDirectory` and
+`recordOnAgentStop` are machine-wide settings (not per workspace), because
+every window shares the one hook.
 
 Each step of the recorder has a time budget, so the editor is not held for
 long: a tick reads at most about 120 ms of Cursor's store (see
@@ -181,7 +185,7 @@ store has been read up to date, so the lookups below see every message.
 | `context/<sha256>.bin` | One part of the context sent beside the prompt (rules, skills, subagent definitions or MCP tools), stored once, named by the sha256 Cursor uses for it. `<sha256>.redacted.bin` when it held credentials, replaced (see [Context sent beside the prompt](#context-sent-beside-the-prompt)). |
 | `context/<sha256>.md` | The same part, readable: one collapsed section per rule, skill, subagent or tool. |
 | `index.json` | All recorded chats, newest first, each with its subagent tree. Written at most every 30 s while older chats are recorded, and when that ends. |
-| `.store-index.sqlite` | An index of the message blobs in Cursor's store by the tool call ids they hold and the digests of their assistant texts, so a lookup of a replaced result or an interrupted reply is a query, not a read of the store. Built once, in steps, from every row of the store (about 8 s of work over a few minutes of ticks for a store of this size); it only gains entries, and rows Cursor renumbers are read again. A cache: deleting it costs a new read, not a record. |
+| `.store-index.sqlite` | An index of the message blobs in Cursor's store by the tool call ids they hold and the digests of their assistant texts, so a lookup of a replaced result or an interrupted reply is a query, not a read of the store. Built once, in steps, from every row of the store (about 8 s of work over a few minutes of ticks for a store of this size); it only gains entries. It keeps its place by the last message blob it read (Cursor never rewrites a blob, unlike the chat rows it replaces on every update): only when that blob is renumbered (VACUUM) or removed is the store read again, and chats are recorded meanwhile, their lookups waiting for the read. A blob Cursor wrote again and that a renumbering then put back at its old rowid would be missed; Cursor has not been seen to do either. A cache: deleting it costs a new read, not a record. |
 
 - **Folder names** follow the chat name, with characters that are not valid
   in file names replaced by `-`. When two chats share a name, the later one
@@ -195,8 +199,11 @@ store has been read up to date, so the lookups below see every message.
   for the largest histories). Chats opened but never sent are
   skipped. Expect the full history to take a few GB if you have thousands of
   chats; set `historyBackfillDays` to limit it.
-- **Commands:** **Record Focused Chat Now** records the chat focused in this
-  window, and its subagents, at once, and offers to open its `chat.md`;
+- **Commands:** **Record Focused Chat Now** asks the recorder (in whichever
+  window records) to record the chat focused in this window, and its
+  subagents, at once, then offers to open its `chat.md`. While the recorder is
+  still reading Cursor's store for the first time, the chat is recorded when
+  that ends;
   **Record History of All Chats** records everything at once;
   **Open Session History Folder** opens the folder.
 

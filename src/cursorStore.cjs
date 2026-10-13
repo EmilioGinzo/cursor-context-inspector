@@ -82,12 +82,13 @@ function maxRowid(db) {
   return row && row.m ? row.m : 0;
 }
 
-// The last message blob at or below `rowid` ({ rowid, key }), or after `from` and at or below `rowid`.
+// The last message blob at or below `rowid` ({ rowid, key }), or after `from` and at or below `rowid`;
+// blobs without a value are skipped, as blobRows skips them.
 // A blob's key names its content, so Cursor never rewrites it: unlike the chat rows, which it replaces
 // (deleting the row and adding it again at a new rowid) on every update.
 function lastBlobAtOrBelow(db, rowid, from = 0) {
   return db.prepare(`SELECT rowid AS rowid, key FROM cursorDiskKV
-    WHERE rowid > ? AND rowid <= ? AND key >= 'agentKv:blob:' AND key < 'agentKv:blob;'
+    WHERE rowid > ? AND rowid <= ? AND key >= 'agentKv:blob:' AND key < 'agentKv:blob;' AND value IS NOT NULL
     ORDER BY rowid DESC LIMIT 1`).get(from, rowid);
 }
 

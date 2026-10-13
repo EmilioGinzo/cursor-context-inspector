@@ -66,59 +66,103 @@ function readMeta(composerId) {
   }
 }
 
-// Snapshot changed chats every 30 s, and as soon as an agent turn ends (Cursor's stop hook);
-// one window records, the others skip. Older chats, the store's index, and changed chats a tick had no time
-// for are caught up in small batches, every 5 s until done.
+// Snapshot changed chats every 30 s, and as soon as an agent turn ends (Cursor's stop hook) or a chat is
+// asked for (Record Focused Chat Now); one window records, the others skip. Older chats, the store's index,
+// and changed chats a tick had no time for are caught up in small batches, every 5 s until done.
 function startRecorder(context) {
   const enabled = settings().get('recordHistory');
   const onStop = enabled && settings().get('recordOnAgentStop');
   const dir = historyDir();
-  const hook = stopHook.syncHook({ historyDir: dir, enabled: onStop });
-  if (hook === 'unreadable') console.error(`[context-inspector] ${stopHook.defaultHooksFile()} is not valid JSON; the stop hook was not installed.`);
+  try {
+    const hook = stopHook.syncHook({ historyDir: dir, enabled: onStop });
+    if (hook === 'unreadable') console.error(`[context-inspector] ${stopHook.defaultHooksFile()} is not JSON of the shape Cursor reads; the stop hook was not changed.`);
+  } catch (err) {
+    console.error('[context-inspector] could not update the stop hook:', err);
+  }
   if (!enabled) return;
   let db;
   let lastWrite;
-  let backfilling = true;
+  let busy = true;
   let timer;
-  let stopTimers = [];
+  let soonTimers = [];
+  // Chats asked for: id -> when (dropped after REQUEST_MS if no window records them).
+  const requests = new Map();
   const run = () => {
     clearTimeout(timer);
     try {
+      for (const [id, at] of requests) if (Date.now() - at > REQUEST_MS) requests.delete(id);
       // Cursor commits through the WAL; unchanged mtime means no chat changed.
       const dbPath = databasePath(context);
       const stat = fs.statSync(`${dbPath}-wal`, { throwIfNoEntry: false }) || fs.statSync(dbPath);
-      if (stat.mtimeMs !== lastWrite || backfilling) {
+      if (stat.mtimeMs !== lastWrite || busy || requests.size) {
         lastWrite = stat.mtimeMs;
         db = db || store.openDatabase(dbPath);
-        const result = history.tick(db, historyDir(), {
+        const result = history.tick(db, dir, {
           backfillDays: settings().get('historyBackfillDays'),
+          record: [...requests.keys()],
           ...recordOptions(context),
         });
-        backfilling = !!(result.backfilling || result.indexing || result.behind);
+        for (const id of result.requested || []) {
+          requests.delete(id);
+          writeJson(recordedFile(dir), { conversation_id: id, at: Date.now() });
+        }
+        busy = !!(result.backfilling || result.indexing || result.behind);
       }
     } catch (err) {
       console.error('[context-inspector] history recording failed:', err);
     }
-    timer = setTimeout(run, backfilling ? 5000 : 30000);
+    timer = setTimeout(run, busy || requests.size ? 5000 : 30000);
   };
   timer = setTimeout(run, 5000);
-  // Cursor may write the turn's last messages to its store just after the hook runs: look again a little later.
-  const signal = stopHook.signalFile(dir);
-  const onSignal = (now, before) => {
-    if (now.mtimeMs === before.mtimeMs) return;
-    stopTimers.forEach(clearTimeout);
-    stopTimers = [500, 3000, 10000].map((ms) => setTimeout(run, ms));
+  const soon = (delays) => {
+    soonTimers.forEach(clearTimeout);
+    soonTimers = delays.map((ms) => setTimeout(run, ms));
   };
-  if (onStop) fs.watchFile(signal, { interval: 500 }, onSignal);
+  // A turn ended: Cursor may write its last messages to its store just after the hook runs, so look again
+  // a little later.
+  const stopSignal = stopHook.signalFile(dir);
+  const onStopSignal = (now, before) => {
+    if (now.mtimeMs !== before.mtimeMs) soon([500, 3000, 10000]);
+  };
+  const onRequest = (now, before) => {
+    if (now.mtimeMs === before.mtimeMs) return;
+    const asked = readJson(requestFile(dir));
+    if (asked && typeof asked.conversation_id === 'string') requests.set(asked.conversation_id, Date.now());
+    soon([0]);
+  };
+  if (onStop) fs.watchFile(stopSignal, { interval: 500 }, onStopSignal);
+  fs.watchFile(requestFile(dir), { interval: 500 }, onRequest);
   context.subscriptions.push({
     dispose: () => {
       clearTimeout(timer);
-      stopTimers.forEach(clearTimeout);
-      fs.unwatchFile(signal, onSignal);
+      soonTimers.forEach(clearTimeout);
+      fs.unwatchFile(stopSignal, onStopSignal);
+      fs.unwatchFile(requestFile(dir), onRequest);
       if (db) db.close();
       storeIndex.close(dir);
     },
   });
+}
+
+// Record Focused Chat Now asks every window's recorder for a chat through requestFile; the one that
+// records it answers in recordedFile.
+const REQUEST_MS = 120000;
+const requestFile = (dir) => path.resolve(dir, '.context-inspector-record-request.json');
+const recordedFile = (dir) => path.resolve(dir, '.context-inspector-recorded.json');
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value));
+  fs.renameSync(tmp, file);
 }
 
 // What the recorder records, from the settings.
@@ -130,36 +174,45 @@ function recordOptions(context) {
   };
 }
 
-// Records the chat focused in this window, and its subagents, now.
+// Records the chat focused in this window, and its subagents, now: asks the window that records (this one
+// or another) and waits for its answer.
 async function recordFocused(context) {
+  if (!settings().get('recordHistory')) {
+    vscode.window.showInformationMessage('Session history is off (cursorContextInspector.recordHistory).');
+    return;
+  }
   const db = store.openDatabase(databasePath(context));
+  let id;
   try {
-    const id = await focus.chatId(db);
-    if (!id) {
-      vscode.window.showInformationMessage('No focused Cursor agent chat to record.');
-      return;
-    }
-    const recorded = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Recording the focused chat…' },
-      async () => {
-        // The record blocks this thread: let the notification show first.
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        const n = history.recordChat(db, id, historyDir(), new Set(), recordOptions(context));
-        history.writeIndex(historyDir());
-        return n;
-      },
-    );
-    const entry = findEntry(id);
-    const pick = await vscode.window.showInformationMessage(
-      recorded ? `Recorded ${recorded} new snapshot(s) of the focused chat.` : 'The focused chat is already recorded as it is now.',
-      ...(entry ? ['Open chat.md'] : []),
-    );
-    if (pick) await vscode.window.showTextDocument(vscode.Uri.file(path.join(historyDir(), entry.path, 'chat.md')));
-  } catch (err) {
-    vscode.window.showErrorMessage(`Recording the focused chat failed: ${err && err.message ? err.message : err}`);
+    id = await (Inspector.current ? Inspector.current.focus : focus).chatId(db);
   } finally {
     db.close();
   }
+  if (!id) {
+    vscode.window.showInformationMessage('No focused Cursor agent chat to record.');
+    return;
+  }
+  const dir = historyDir();
+  const asked = Date.now();
+  writeJson(requestFile(dir), { conversation_id: id, at: asked });
+  const done = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Recording the focused chat…' },
+    async () => {
+      for (let waited = 0; waited < 30000; waited += 250) {
+        const answer = readJson(recordedFile(dir));
+        if (answer && answer.conversation_id === id && answer.at >= asked) return true;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return false;
+    },
+  );
+  if (!done) {
+    vscode.window.showWarningMessage('The focused chat is not recorded yet: the recorder may still be reading Cursor\'s store. It is recorded as soon as it can.');
+    return;
+  }
+  const entry = findEntry(id);
+  const pick = await vscode.window.showInformationMessage('Recorded the focused chat.', ...(entry ? ['Open chat.md'] : []));
+  if (pick) await vscode.window.showTextDocument(vscode.Uri.file(path.join(dir, entry.path, 'chat.md')));
 }
 
 // Cursor's logs folder (one folder per launch: <YYYYMMDDTHHMMSS>/), above this extension's own log
@@ -200,7 +253,8 @@ async function recordAll(context) {
   });
 }
 
-// Tracks the chat focused in this window, for the inspector and for recording the focused chat.
+// Tracks the chat focused in this window: one for each inspector panel, and one for Record Focused Chat Now
+// while no panel is open.
 class FocusTracker {
   constructor(context) {
     this.context = context;
@@ -284,6 +338,7 @@ class Inspector {
     this.follow = true;
     this.chatId = undefined;
     this.ready = false;
+    this.focus = new FocusTracker(context);
     this.itemIndex = new Map();
     this.panel = vscode.window.createWebviewPanel(VIEW_TYPE, 'Agent Context', vscode.ViewColumn.Active, {
       enableScripts: true,
@@ -368,7 +423,7 @@ class Inspector {
   }
 
   async focusedChatId(db) {
-    return focus.chatId(db);
+    return this.focus.chatId(db);
   }
 
   async reload({ refocus = false } = {}) {

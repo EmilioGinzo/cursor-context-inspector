@@ -15,47 +15,73 @@ function defaultHooksFile() {
   return path.join(os.homedir(), '.cursor', 'hooks.json');
 }
 
-function signalFile(historyDir) {
-  return path.join(historyDir, `.${MARK}.json`);
+// The hook runs in another working directory than the extension: the path is made absolute.
+function signalFile(historyDir, paths = path) {
+  return paths.resolve(historyDir, `.${MARK}.json`);
 }
 
 // The shell command that copies stdin to the signal file; the file name carries the mark.
 function hookCommand(historyDir, platform = process.platform) {
-  const file = signalFile(historyDir);
+  const file = signalFile(historyDir, platform === 'win32' ? path.win32 : path.posix);
   if (platform === 'win32') {
+    // Encoded, so no shell (cmd or PowerShell) expands anything in the path.
     const quoted = `'${file.replace(/'/g, "''")}'`;
-    return `powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path (Split-Path ${quoted}) | Out-Null; [Console]::In.ReadToEnd() | Set-Content -LiteralPath ${quoted}"`;
+    const script = `New-Item -ItemType Directory -Force -Path (Split-Path -LiteralPath ${quoted}) | Out-Null; [IO.File]::WriteAllText(${quoted}, [Console]::In.ReadToEnd()) # ${MARK}`;
+    return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
   }
   const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
-  return `mkdir -p ${quote(path.dirname(file))} && cat > ${quote(file)}`;
+  return `mkdir -p ${quote(path.posix.dirname(file))} && cat > ${quote(file)}`;
 }
 
-// Adds our stop hook to hooks.json (or removes it when enabled is false), keeping every other hook.
-// Returns 'written', 'removed', 'unchanged', or 'unreadable' when the file is not JSON we can safely edit.
+const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const ours = (h) => isObject(h) && typeof h.command === 'string' && (h.command.includes(MARK) || isOurEncoded(h.command));
+// The Windows command carries the mark inside its encoded script.
+function isOurEncoded(command) {
+  const m = /-EncodedCommand ([A-Za-z0-9+/=]+)/.exec(command);
+  return !!m && Buffer.from(m[1], 'base64').toString('utf16le').includes(MARK);
+}
+
+// Adds our stop hook to hooks.json (or removes it when enabled is false), keeping every other hook and
+// the place of ours. Returns 'written', 'removed', 'unchanged', or 'unreadable' when the file is not JSON
+// of the shape Cursor reads (an object, whose hooks is an object of arrays): it is then left alone.
+// Writes through a symlink, and keeps the file's mode.
 function syncHook({ historyDir, enabled, hooksFile = defaultHooksFile(), platform = process.platform }) {
   let config;
+  let target = hooksFile;
   try {
-    config = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+    target = fs.realpathSync(hooksFile);
+    config = JSON.parse(fs.readFileSync(target, 'utf8').replace(/^\uFEFF/, ''));
   } catch (err) {
     if (err.code !== 'ENOENT') return 'unreadable';
     if (!enabled) return 'unchanged';
     config = { version: 1, hooks: {} };
   }
-  if (!config || typeof config !== 'object' || (config.hooks !== undefined && typeof config.hooks !== 'object')) return 'unreadable';
+  if (!isObject(config) || (config.hooks !== undefined && !isObject(config.hooks))) return 'unreadable';
   const hooks = config.hooks || {};
-  const stop = Array.isArray(hooks.stop) ? hooks.stop : [];
-  const others = stop.filter((h) => !(h && typeof h.command === 'string' && h.command.includes(MARK)));
-  const wanted = enabled ? [...others, { command: hookCommand(historyDir, platform), timeout: 10 }] : others;
+  if (hooks.stop !== undefined && !Array.isArray(hooks.stop)) return 'unreadable';
+  const stop = hooks.stop || [];
+  const entry = { command: hookCommand(historyDir, platform), timeout: 10 };
+  const at = stop.findIndex(ours);
+  let wanted = stop.filter((h, i) => !ours(h) || i === at);
+  if (!enabled) wanted = wanted.filter((h) => !ours(h));
+  else if (at === -1) wanted.push(entry);
+  else wanted = wanted.map((h) => (ours(h) ? entry : h));
   if (JSON.stringify(wanted) === JSON.stringify(stop)) return 'unchanged';
 
   if (wanted.length) hooks.stop = wanted;
   else delete hooks.stop;
   config.hooks = hooks;
   if (config.version === undefined) config.version = 1;
-  fs.mkdirSync(path.dirname(hooksFile), { recursive: true });
-  const tmp = `${hooksFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
-  fs.renameSync(tmp, hooksFile);
+  const mode = fs.statSync(target, { throwIfNoEntry: false });
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, mode ? { mode: mode.mode & 0o777 } : undefined);
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
   return enabled ? 'written' : 'removed';
 }
 

@@ -60,22 +60,28 @@ function open(dir) {
     advance(cursorDb, { budgetMs = Infinity, clock = Date.now, chunkRows = CHUNK_ROWS } = {}) {
       const max = store.maxRowid(cursorDb);
       let watermark = index.watermark();
-      // The anchor is the last blob read. Before 0.11 it was the key of any row, and had no rowid: it is
-      // taken again from the store.
-      let anchorRowid = Number(get('anchorRowid') || 0);
-      if (watermark > 0 && get('anchorRowid') === undefined) {
-        const last = store.lastBlobAtOrBelow(cursorDb, watermark);
-        anchorRowid = last ? last.rowid : 0;
+      // The anchor is the last blob read (anchorRowid 0: none yet). An index of an earlier version has an
+      // anchor that is the key of any row, and no anchorRowid: the anchor is taken again from the store.
+      if (get('anchorRowid') === undefined) {
+        const last = watermark > 0 ? store.lastBlobAtOrBelow(cursorDb, watermark) : undefined;
         setAnchor(last);
       }
+      let anchorRowid = Number(get('anchorRowid'));
       const anchor = get('anchor');
-      if (watermark > max || (anchor && store.rowidOf(cursorDb, anchor) !== anchorRowid)) {
+      if (anchor && store.rowidOf(cursorDb, anchor) !== anchorRowid) {
         // The rows were renumbered (VACUUM), or the blob was removed: the rows are read again (entries are
         // only added, so this adds nothing twice). Other rows removed and written again change nothing.
         watermark = 0;
         set('watermark', 0);
         setAnchor(undefined);
-      } else if (watermark > anchorRowid && store.lastBlobAtOrBelow(cursorDb, watermark, anchorRowid)) {
+        anchorRowid = 0;
+      } else if (watermark > max) {
+        // The last rows were removed: none is left to read after the store's last row. The ones written next
+        // may be given the same rowids; the check below finds them.
+        watermark = max;
+        set('watermark', watermark);
+      }
+      if (watermark > anchorRowid && store.lastBlobAtOrBelow(cursorDb, watermark, anchorRowid)) {
         // A blob under the watermark, after the last one read: the rowids of rows removed at the end were
         // given again. Those rows are read again.
         watermark = anchorRowid;

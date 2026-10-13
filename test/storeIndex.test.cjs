@@ -140,6 +140,63 @@ test('chats are recorded while the store is read again, once it was read in full
   assert.strictEqual(tick.recorded, 1);
 });
 
+test('the last rows removed, the index keeps its place and reads the rows given their rowids again', () => {
+  const { db, dir } = setup();
+  const index = storeIndex.open(dir);
+  putBlob(db, { role: 'user', content: 'first' });
+  fill(db, 300);
+  index.advance(db);
+  const read = index.stats.rowsRead;
+  db.prepare("DELETE FROM cursorDiskKV WHERE key IN ('bubbleId:filler:298', 'bubbleId:filler:299')").run();
+  index.advance(db);
+  assert.strictEqual(index.stats.rowsRead, read, 'nothing is read again');
+  // The next rows are given the removed rowids.
+  putBlob(db, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'tool_e', args: {} }] });
+  index.advance(db);
+  assert.strictEqual(index.callHashes('tool_e').length, 1);
+  assert.ok(index.stats.rowsRead - read < 300);
+});
+
+test('an index that read no blob yet still finds a blob given a removed rowid', () => {
+  const { db, dir } = setup();
+  const index = storeIndex.open(dir);
+  for (const k of ['a', 'b', 'c']) db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(`composerData:${k}`, '{}');
+  index.advance(db);
+  db.prepare("DELETE FROM cursorDiskKV WHERE key IN ('composerData:b', 'composerData:c')").run();
+  putBlob(db, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'tool_x', args: {} }] });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:d', '{}');
+  index.advance(db);
+  assert.strictEqual(index.callHashes('tool_x').length, 1);
+});
+
+test('a blob row without a value does not make each advance read again', () => {
+  const { db, dir } = setup();
+  const index = storeIndex.open(dir);
+  putBlob(db, { role: 'user', content: 'first' });
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, NULL)').run('agentKv:blob:empty');
+  fill(db, 300);
+  index.advance(db);
+  const read = index.stats.rowsRead;
+  index.advance(db);
+  index.advance(db);
+  assert.strictEqual(index.stats.rowsRead, read);
+});
+
+test('a tick records the chats asked for, changed or not, and says which', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:old', composerOf('old chat', 5, message));
+  const now = Date.now();
+  assert.deepStrictEqual(history.tick(db, dir, { clock: () => now }).requested, []);
+  fs.rmSync(path.join(dir, 'index.json'));
+  // Unchanged since the last tick: recorded again only because it is asked for.
+  const tick = history.tick(db, dir, { clock: () => now, record: ['old'] });
+  assert.deepStrictEqual(tick.requested, ['old']);
+  assert.ok(fs.existsSync(path.join(dir, 'chats', 'old chat', 'chat.md')));
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).some((c) => c.composerId === 'old'));
+});
+
 // The conversation state of a chat whose prompt is this one message (field 1: its blob hash).
 const stateOf = (message) => {
   const digest = crypto.createHash('sha256').update(JSON.stringify(message)).digest();

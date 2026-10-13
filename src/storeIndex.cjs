@@ -6,7 +6,7 @@
 // Looking for each one reads the store again; the index reads every row once instead. It advances in
 // steps of rows (by rowid), each within a time budget, so the work is spread over ticks. Lookups are
 // queries of the index, and the index is kept in <history dir>/.store-index.sqlite. It only ever gains
-// entries: a store whose rows were renumbered (VACUUM) or removed under the watermark is read again.
+// entries: a store whose rows were renumbered (VACUUM), or whose last blob read was removed, is read again.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,6 +35,11 @@ function open(dir) {
     CREATE TABLE IF NOT EXISTS texts (digest TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (digest, hash)) WITHOUT ROWID;`);
   const get = (k) => { const r = db.prepare('SELECT v FROM state WHERE k = ?').get(k); return r ? r.v : undefined; };
   const set = (k, v) => db.prepare('INSERT OR REPLACE INTO state (k, v) VALUES (?, ?)').run(k, String(v));
+  // The last blob read ({ rowid, key }), or none.
+  const setAnchor = (blob) => {
+    if (blob) { set('anchor', blob.key || `agentKv:blob:${blob.hash}`); set('anchorRowid', blob.rowid); }
+    else { db.exec("DELETE FROM state WHERE k = 'anchor'"); set('anchorRowid', 0); }
+  };
   const insertCall = db.prepare('INSERT OR IGNORE INTO calls (id, hash) VALUES (?, ?)');
   const insertText = db.prepare('INSERT OR IGNORE INTO texts (digest, hash) VALUES (?, ?)');
   const callsOf = db.prepare('SELECT hash FROM calls WHERE id = ?');
@@ -44,6 +49,8 @@ function open(dir) {
     // Rows read so far by this process (for tests and measurements).
     stats: { rowsRead: 0 },
     watermark: () => Number(get('watermark') || 0),
+    // True once every row was read, even if the rows are being read again since.
+    complete: () => get('complete') === '1',
     // The blobs naming the tool call `id` (in a part of their content).
     callHashes: (id) => callsOf.all(id).map((r) => r.hash),
     // The blobs whose assistant text is `text` (compared trimmed).
@@ -53,10 +60,26 @@ function open(dir) {
     advance(cursorDb, { budgetMs = Infinity, clock = Date.now, chunkRows = CHUNK_ROWS } = {}) {
       const max = store.maxRowid(cursorDb);
       let watermark = index.watermark();
-      if (watermark > 0 && (watermark > max || store.keyAtOrBelow(cursorDb, watermark) !== get('anchor'))) {
-        // Renumbered or removed rows: the rows are read again (entries are only added, so this adds nothing twice).
+      // The anchor is the last blob read. Before 0.11 it was the key of any row, and had no rowid: it is
+      // taken again from the store.
+      let anchorRowid = Number(get('anchorRowid') || 0);
+      if (watermark > 0 && get('anchorRowid') === undefined) {
+        const last = store.lastBlobAtOrBelow(cursorDb, watermark);
+        anchorRowid = last ? last.rowid : 0;
+        setAnchor(last);
+      }
+      const anchor = get('anchor');
+      if (watermark > max || (anchor && store.rowidOf(cursorDb, anchor) !== anchorRowid)) {
+        // The rows were renumbered (VACUUM), or the blob was removed: the rows are read again (entries are
+        // only added, so this adds nothing twice). Other rows removed and written again change nothing.
         watermark = 0;
         set('watermark', 0);
+        setAnchor(undefined);
+      } else if (watermark > anchorRowid && store.lastBlobAtOrBelow(cursorDb, watermark, anchorRowid)) {
+        // A blob under the watermark, after the last one read: the rowids of rows removed at the end were
+        // given again. Those rows are read again.
+        watermark = anchorRowid;
+        set('watermark', watermark);
       }
       const start = clock();
       let steps = 0;
@@ -68,7 +91,8 @@ function open(dir) {
         try {
           for (const { hash, value } of blobs) addBlob(hash, value);
           set('watermark', to);
-          set('anchor', store.keyAtOrBelow(cursorDb, to) || '');
+          if (blobs.length) setAnchor(blobs[blobs.length - 1]);
+          if (to >= max) set('complete', 1);
           db.exec('COMMIT');
         } catch (err) {
           db.exec('ROLLBACK');

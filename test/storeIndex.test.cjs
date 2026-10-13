@@ -94,6 +94,52 @@ test('rows renumbered or removed under the watermark are read again', () => {
   assert.strictEqual(index.callHashes('tool_b').length, 1, 'entries already there are kept once');
 });
 
+test('a chat row Cursor replaces at the end of the store does not read the store again', () => {
+  const { db, dir } = setup();
+  const index = storeIndex.open(dir);
+  putBlob(db, { role: 'user', content: 'hi' });
+  fill(db, 300);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', '{}');
+  index.advance(db);
+  const read = index.stats.rowsRead;
+  // UNIQUE ON CONFLICT REPLACE: the row is removed, and written again with the next rowid.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', '{"lastUpdatedAt":1}');
+  index.advance(db);
+  assert.strictEqual(index.stats.rowsRead - read, 1, 'only the new row is read');
+});
+
+test('rows renumbered by a vacuum are read again', () => {
+  const { db, dir } = setup();
+  const index = storeIndex.open(dir);
+  fill(db, 5);
+  putBlob(db, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'tool_c', args: {} }] });
+  index.advance(db);
+  // The fillers before the blob are removed and the rows renumbered: the blob is now at rowid 1.
+  db.exec("DELETE FROM cursorDiskKV WHERE key LIKE 'bubbleId:filler:%'; CREATE TABLE t AS SELECT key, value FROM cursorDiskKV; DELETE FROM cursorDiskKV; INSERT INTO cursorDiskKV SELECT * FROM t; DROP TABLE t;");
+  putBlob(db, { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'tool_d', args: {} }] });
+  index.advance(db);
+  assert.strictEqual(index.callHashes('tool_d').length, 1);
+  assert.strictEqual(index.callHashes('tool_c').length, 1);
+});
+
+test('chats are recorded while the store is read again, once it was read in full', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  fill(db, 600);
+  const budget = { index: 0, record: Infinity };
+  const clock = stepClock();
+  while (history.tick(db, dir, { clock, budgetMs: budget }).indexing);
+  // Renumbered rows (the blob read last is gone): the store is read again, three ticks of 256 rows.
+  db.exec("DELETE FROM cursorDiskKV WHERE key LIKE 'agentKv:blob:%'");
+  putBlob(db, message);
+  fill(db, 10);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:a', composerOf('chat a', Date.now() + 1000, message));
+  const tick = history.tick(db, dir, { clock, budgetMs: budget });
+  assert.strictEqual(tick.indexing, true);
+  assert.strictEqual(tick.recorded, 1);
+});
+
 // The conversation state of a chat whose prompt is this one message (field 1: its blob hash).
 const stateOf = (message) => {
   const digest = crypto.createHash('sha256').update(JSON.stringify(message)).digest();

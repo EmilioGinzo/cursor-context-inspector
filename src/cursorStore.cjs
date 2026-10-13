@@ -82,10 +82,19 @@ function maxRowid(db) {
   return row && row.m ? row.m : 0;
 }
 
-// The key of the last row at or below `rowid`: a row the index read, if it is still there.
-function keyAtOrBelow(db, rowid) {
-  const row = db.prepare('SELECT key FROM cursorDiskKV WHERE rowid <= ? ORDER BY rowid DESC LIMIT 1').get(rowid);
-  return row ? row.key : undefined;
+// The last message blob at or below `rowid` ({ rowid, key }), or after `from` and at or below `rowid`.
+// A blob's key names its content, so Cursor never rewrites it: unlike the chat rows, which it replaces
+// (deleting the row and adding it again at a new rowid) on every update.
+function lastBlobAtOrBelow(db, rowid, from = 0) {
+  return db.prepare(`SELECT rowid AS rowid, key FROM cursorDiskKV
+    WHERE rowid > ? AND rowid <= ? AND key >= 'agentKv:blob:' AND key < 'agentKv:blob;'
+    ORDER BY rowid DESC LIMIT 1`).get(from, rowid);
+}
+
+// The rowid of the row with key `key`, or undefined.
+function rowidOf(db, key) {
+  const row = db.prepare('SELECT rowid AS rowid FROM cursorDiskKV WHERE key = ?').get(key);
+  return row ? row.rowid : undefined;
 }
 
 // Subagent chats are excluded by default; they are reached through their parent.
@@ -617,7 +626,8 @@ module.exports = {
   rowidOf,
   blobRows,
   maxRowid,
-  keyAtOrBelow,
+  lastBlobAtOrBelow,
+  rowidOf,
   messageText,
   ancestors,
   loadSubagents,

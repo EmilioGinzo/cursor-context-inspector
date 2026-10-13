@@ -197,6 +197,28 @@ test('a tick records the chats asked for, changed or not, and says which', () =>
   assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')).some((c) => c.composerId === 'old'));
 });
 
+test('a chat asked for that cannot be recorded is returned as failed, with the error', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:bad', JSON.stringify({ ...JSON.parse(composerOf('bad', 1, message)), subagentComposerIds: 5 }));
+  const tick = history.tick(db, dir, { record: ['bad'] });
+  assert.deepStrictEqual(tick.requested, []);
+  assert.ok(tick.failed.bad);
+});
+
+test('the chats asked for count in what a tick recorded', () => {
+  const { db, dir } = setup();
+  const message = { role: 'user', content: 'hi' };
+  putBlob(db, message);
+  const now = Date.now();
+  history.tick(db, dir, { clock: () => now });
+  // Older than the tick's watermark, after the backfill: only asking records it.
+  db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run('composerData:late', composerOf('late chat', 5, message));
+  assert.strictEqual(history.tick(db, dir, { clock: () => now }).recorded, 0);
+  assert.strictEqual(history.tick(db, dir, { clock: () => now, record: ['late'] }).recorded, 1);
+});
+
 // The conversation state of a chat whose prompt is this one message (field 1: its blob hash).
 const stateOf = (message) => {
   const digest = crypto.createHash('sha256').update(JSON.stringify(message)).digest();

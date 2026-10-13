@@ -156,8 +156,8 @@ writes the turn (conversation id, status) to
 `.context-inspector-agent-stopped.json` in the history folder. The recorder
 watches that file and records within a second, then checks again after 3 s
 and 10 s, because Cursor can store the last messages just after the hook runs.
-If you set `recordOnAgentStop` to `false`, the hook is removed at the next
-Reload Window, and uninstalling the extension removes it too. If `hooks.json`
+If you set `recordOnAgentStop` to `false`, the hook is removed at once, and
+uninstalling the extension removes it too. If `hooks.json`
 is not JSON of the shape Cursor reads (an object whose `hooks` holds arrays),
 the extension does not change it. A symlinked `hooks.json` is written through
 the link, and keeps its permissions. `recordHistory`, `historyDirectory` and
@@ -203,7 +203,9 @@ store has been read up to date, so the lookups below see every message.
   window records) to record the chat focused in this window, and its
   subagents, at once, then offers to open its `chat.md`. While the recorder is
   still reading Cursor's store for the first time, the chat is recorded when
-  that ends;
+  that ends. Without an open inspector panel, the focused chat is read from
+  the open chat panes and Cursor's stored focus, which Cursor saves about once
+  a minute: a chat switched to just before may not be the one recorded;
   **Record History of All Chats** records everything at once;
   **Open Session History Folder** opens the folder.
 

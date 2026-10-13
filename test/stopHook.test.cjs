@@ -115,3 +115,32 @@ test('a write that fails throws, and leaves no temporary file', { skip: process.
   }
   assert.deepStrictEqual(fs.readdirSync(dir), ['hooks.json']);
 });
+
+test('writes through a dangling symlink, and keeps the exact mode', { skip: process.platform === 'win32' }, () => {
+  const dir = tmp();
+  const hooksFile = path.join(dir, 'hooks.json');
+  fs.symlinkSync(path.join('dotfiles', 'hooks.json'), hooksFile);
+  fs.mkdirSync(path.join(dir, 'dotfiles'));
+  // The link's target is not there yet.
+  assert.strictEqual(stopHook.syncHook({ historyDir: dir, enabled: true, hooksFile }), 'written');
+  assert.ok(fs.lstatSync(hooksFile).isSymbolicLink());
+  assert.strictEqual(read(path.join(dir, 'dotfiles', 'hooks.json')).hooks.stop.length, 1);
+
+  const plain = path.join(dir, 'plain.json');
+  fs.writeFileSync(plain, '{}');
+  fs.chmodSync(plain, 0o664);
+  stopHook.syncHook({ historyDir: dir, enabled: true, hooksFile: plain });
+  assert.strictEqual(fs.statSync(plain).mode & 0o777, 0o664);
+});
+
+test('a hook of the user that names the signal file is not taken for ours', () => {
+  const dir = tmp();
+  const hooksFile = path.join(dir, 'hooks.json');
+  const mine = { command: `cat ~/.cursor-context-history/.${stopHook.MARK}.json | notify` };
+  fs.writeFileSync(hooksFile, JSON.stringify({ version: 1, hooks: { stop: [mine] } }));
+  stopHook.syncHook({ historyDir: dir, enabled: true, hooksFile });
+  assert.deepStrictEqual(read(hooksFile).hooks.stop[0], mine);
+  assert.strictEqual(read(hooksFile).hooks.stop.length, 2);
+  stopHook.syncHook({ historyDir: dir, enabled: false, hooksFile });
+  assert.deepStrictEqual(read(hooksFile).hooks.stop, [mine]);
+});

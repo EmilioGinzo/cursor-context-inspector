@@ -34,11 +34,25 @@ function hookCommand(historyDir, platform = process.platform) {
 }
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-const ours = (h) => isObject(h) && typeof h.command === 'string' && (h.command.includes(MARK) || isOurEncoded(h.command));
-// The Windows command carries the mark inside its encoded script.
+// Our entry: a command of the form hookCommand writes (the Windows one carries the mark in its encoded script).
+const ours = (h) => isObject(h) && typeof h.command === 'string' && (isOurPosix(h.command) || isOurEncoded(h.command));
+const isOurPosix = (command) => command.startsWith('mkdir -p ') && command.endsWith(`/.${MARK}.json'`);
 function isOurEncoded(command) {
-  const m = /-EncodedCommand ([A-Za-z0-9+/=]+)/.exec(command);
-  return !!m && Buffer.from(m[1], 'base64').toString('utf16le').includes(MARK);
+  const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command);
+  return !!m && Buffer.from(m[1], 'base64').toString('utf16le').endsWith(`# ${MARK}`);
+}
+
+// The file a path names, following symlinks, even to a file not there yet.
+function resolveLinks(file, depth = 0) {
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return file;
+    throw err;
+  }
+  if (!stat.isSymbolicLink() || depth > 40) return file;
+  return resolveLinks(path.resolve(path.dirname(file), fs.readlinkSync(file)), depth + 1);
 }
 
 // Adds our stop hook to hooks.json (or removes it when enabled is false), keeping every other hook and
@@ -49,7 +63,7 @@ function syncHook({ historyDir, enabled, hooksFile = defaultHooksFile(), platfor
   let config;
   let target = hooksFile;
   try {
-    target = fs.realpathSync(hooksFile);
+    target = resolveLinks(hooksFile);
     config = JSON.parse(fs.readFileSync(target, 'utf8').replace(/^\uFEFF/, ''));
   } catch (err) {
     if (err.code !== 'ENOENT') return 'unreadable';
@@ -76,7 +90,8 @@ function syncHook({ historyDir, enabled, hooksFile = defaultHooksFile(), platfor
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, mode ? { mode: mode.mode & 0o777 } : undefined);
+    fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
+    if (mode) fs.chmodSync(tmp, mode.mode & 0o777);
     fs.renameSync(tmp, target);
   } catch (err) {
     fs.rmSync(tmp, { force: true });

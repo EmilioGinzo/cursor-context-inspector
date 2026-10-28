@@ -382,7 +382,17 @@ function treeItems(tree, messages) {
   };
   const out = {};
   for (const n of nodes) if (n.kind === 'category') out[n.categoryId] = (byParent.get(n.id) || []).map(build);
+  // Schema 2 (Cursor 3.25) has no category nodes: the top nodes name `category:<id>` as parent.
+  for (const [parentId, kids] of byParent) {
+    const id = parentId.startsWith('category:') && parentId.slice('category:'.length);
+    if (id && !out[id]) out[id] = kids.map(build);
+  }
   return out;
+}
+
+// Whether any tree node carries prompt text. Schema 2 trees list only the tool definitions.
+function treeHasPromptText(tree) {
+  return (tree.nodes || []).some((n) => n.inlineContent !== undefined || (n.contentAvailable && n.source));
 }
 
 // --- coverage (tree mode) ----------------------------------------------------------
@@ -488,11 +498,14 @@ function loadContext(db, composerId, known) {
   const messages = loadMessages(db, composer.conversationState);
   const breakdown = composer.promptTokenBreakdown || {};
   const tree = composer.promptContextUsageTree;
-  // With a tree: Cursor's exact spans plus whatever text they leave uncovered.
-  // Without one: the prompt split by its tagged sections (covers everything).
+  // With a tree that holds text: Cursor's exact spans plus whatever text they leave uncovered.
+  // Otherwise: the prompt split by its tagged sections (covers everything), and the
+  // tree's items for the categories the prompt does not hold (the tool definitions).
+  const spans = tree && treeHasPromptText(tree);
   const fromTree = tree ? treeItems(tree, messages) : undefined;
-  const leftover = tree ? uncoveredItems(tree, messages) : {};
-  const parsed = tree ? undefined : parsedItems(messages);
+  const leftover = spans ? uncoveredItems(tree, messages) : {};
+  const parsed = spans ? undefined : parsedItems(messages);
+  if (parsed && fromTree && fromTree.tools) parsed.tools = fromTree.tools;
 
   const official = new Map((breakdown.categories || []).map((c) => [c.id, c]));
   const categories = CATEGORY_ORDER.map(([id, label]) => {
@@ -500,7 +513,8 @@ function loadContext(db, composerId, known) {
     const treeHasText = treeList.some(hasText);
     const items = parsed ? parsed[id] : [...(treeHasText || id === 'tools' ? treeList : []), ...(leftover[id] || [])];
     const o = official.get(id);
-    if (!treeHasText && o) scaleEstimates(items, o.estimatedTokens);
+    // The tree's tool counts are Cursor's own: only text-measured items are scaled.
+    if (!treeHasText && o && !(id === 'tools' && treeList.length)) scaleEstimates(items, o.estimatedTokens);
     return {
       id,
       label: (o && o.label) || label,

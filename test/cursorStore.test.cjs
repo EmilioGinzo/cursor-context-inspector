@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const store = require('../src/cursorStore.cjs');
 
-function fixture({ withTree }) {
+function fixture({ withTree, schema2 }) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
   const put = (k, v) => db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(k, v);
@@ -62,6 +62,16 @@ function fixture({ withTree }) {
       ],
     };
   }
+  if (schema2) {
+    // Cursor 3.25: no category nodes, and only the tool definitions, which carry no text.
+    composer.promptContextUsageTree = {
+      schemaVersion: 2,
+      nodes: [
+        { id: 'tool:0', parentId: 'category:tools', kind: 'tool_definition', label: 'Shell', categoryId: 'tools', estimatedTokens: 120, characterCount: 800, contentAvailable: false },
+        { id: 'tool:1', parentId: 'category:tools', kind: 'tool_definition', label: 'Read', categoryId: 'tools', estimatedTokens: 60, characterCount: 400, contentAvailable: false },
+      ],
+    };
+  }
   put('composerData:chat-1', JSON.stringify(composer));
   return db;
 }
@@ -109,6 +119,19 @@ test('tree mode slices exact spans, including pretty-printed tool args', () => {
   assert.strictEqual(mcp.length, 1);
   assert.match(mcp[0].text, /^<dynamic_tools>[\s\S]*GetDynamicTools[\s\S]*<\/dynamic_tools>$/);
   assert.strictEqual(byId(ctx, 'skills').items[0].label, '<agent_skills>', 'uncovered preamble sections land in their category');
+});
+
+test('a schema 2 tree lists the tool definitions and the prompt is parsed', () => {
+  const ctx = store.loadContext(fixture({ schema2: true }), 'chat-1');
+  const tools = byId(ctx, 'tools');
+  // Cursor's own counts, not scaled to the category total (300 here; they sum to 180).
+  assert.deepStrictEqual(tools.items.map((i) => [i.label, i.estimatedTokens, i.characterCount]), [['Shell', 120, 800], ['Read', 60, 400]]);
+  assert.match(tools.items[0].unavailable, /not stored/);
+  assert.strictEqual(tools.note, undefined);
+  assert.strictEqual(byId(ctx, 'rules').source, 'parsed');
+  assert.strictEqual(byId(ctx, 'rules').items[0].children[0].children[0].label, 'Style');
+  assert.deepStrictEqual(byId(ctx, 'conversation').items.map((i) => i.label), ['User message (context preamble)', 'User: show me the context', 'Agent message', 'Shell result']);
+  assert.ok(ctx.categories.every((c) => c.items.every((i) => !i.untracked)));
 });
 
 test('tree mode accounts for every non-blank character of the prompt', () => {

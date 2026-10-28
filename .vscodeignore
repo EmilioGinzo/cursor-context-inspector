@@ -3,3 +3,4 @@ docs/**
 *.vsix
 .gitignore
 tools/**
+.claude/**

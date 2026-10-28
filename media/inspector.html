@@ -5,70 +5,120 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}} 'nonce-{{nonce}}'; script-src 'nonce-{{nonce}}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style nonce="{{nonce}}">
-  /* The CSP blocks inline style="" attributes, so colors are classes and widths are set from script. */
-  .c-system_prompt { --cat: #a3a3a3; } .c-tools { --cat: #a99cf5; } .c-rules { --cat: #a3d97a; } .c-skills { --cat: #f5d76e; }
-  .c-mcp { --cat: #8f7cf0; } .c-subagents { --cat: #f5a56e; } .c-summarized_conversation { --cat: #6ec9f5; } .c-conversation { --cat: #f0806a; } .c-raw { --cat: #777; }
+  /* The CSP blocks inline style="" attributes, so colors and depths are classes. */
+  .c-system_prompt { --cat: #9d9d9d; } .c-tools { --cat: var(--vscode-charts-purple, #b180d7); } .c-rules { --cat: var(--vscode-charts-green, #89d185); }
+  .c-skills { --cat: var(--vscode-charts-yellow, #cca700); } .c-mcp { --cat: #e27bb1; } .c-subagents { --cat: var(--vscode-charts-blue, #3794ff); }
+  .c-summarized_conversation { --cat: #4ec9d6; } .c-conversation { --cat: var(--vscode-charts-orange, #d18616); }
+  .c-sent_context { --cat: var(--vscode-charts-red, #f14c4c); } .c-raw, .c-chats { --cat: #8a8a8a; }
 
   * { box-sizing: border-box; }
   body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-  .layout { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; height: 100vh; }
-  .left { border-right: 1px solid var(--vscode-panel-border); overflow: auto; padding: 12px; }
-  .right { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
-  select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); padding: 3px; }
-  button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 4px 9px; border-radius: 3px; cursor: pointer; }
+  .muted { color: var(--vscode-descriptionForeground); }
+  button { font: inherit; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
   button:hover { background: var(--vscode-button-secondaryHoverBackground); }
   button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  button.ghost { background: transparent; color: var(--vscode-foreground); }
+  button.ghost:hover { background: var(--vscode-toolbar-hoverBackground, #ffffff14); }
+  select { min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); padding: 3px; border-radius: 3px; }
+  svg.i { width: 16px; height: 16px; display: block; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Layout: the report alone, or the report beside the text of the selected row. */
+  .app { display: grid; grid-template-columns: 1fr; height: 100vh; }
+  .app.split { grid-template-columns: minmax(400px, 1fr) minmax(0, 1.3fr); }
+  .report { overflow: auto; min-height: 0; scrollbar-gutter: stable; }
+  .page { max-width: 748px; margin: 0 auto; padding: 16px 24px 56px; display: flex; flex-direction: column; gap: 20px; }
+  .viewer { display: none; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--vscode-panel-border); }
+  .app.split .viewer { display: flex; }
+  @media (max-width: 900px) {
+    .app.split { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; }
+    .app.split .viewer { border-left: none; border-top: 1px solid var(--vscode-panel-border); }
+  }
+
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  .toolbar select { flex: 1; }
   label.follow { display: flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--vscode-descriptionForeground); }
-
-  .card { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 8px; padding: 12px; }
-  .title { font-weight: 600; margin-bottom: 8px; }
-  .summary { display: flex; justify-content: space-between; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
-  .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--vscode-input-background); margin-bottom: 10px; }
-  .bar > div { height: 100%; background: var(--cat); }
-  .bar > div + div { margin-left: 1px; }
-  .meta { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 8px; }
-
-  .row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; user-select: none; }
-  .row:hover { background: var(--vscode-list-hoverBackground); }
-  .row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .row .chev { width: 10px; flex: none; color: var(--vscode-descriptionForeground); font-size: 10px; }
-  .row .sw { width: 11px; height: 11px; border-radius: 2px; flex: none; background: var(--cat); }
-  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .tok { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-  .row.dim .name { opacity: .6; }
-  .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 2px 8px; font-size: 12px; }
+  .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; }
   .crumbs:empty { display: none; }
-  .crumb { color: var(--vscode-textLink-foreground); cursor: pointer; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb { color: var(--vscode-textLink-foreground); cursor: pointer; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .crumb:hover { text-decoration: underline; }
-  .crumb.current { color: var(--vscode-foreground); cursor: default; font-weight: 600; }
-  .crumb.current:hover { text-decoration: none; }
   .crumb-sep { color: var(--vscode-descriptionForeground); }
-  .row.sub-head .name { font-weight: 600; }
-  .row.sub .chev { color: var(--vscode-textLink-foreground); }
-  .sub-list { border-left-color: color-mix(in srgb, var(--vscode-textLink-foreground) 45%, transparent); }
-  .row .type { font-size: 10px; padding: 0 5px; border-radius: 3px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
-  .row { min-width: 0; }
-  .row .sub-badge, .row .type, .row .untracked { flex: none; }
-  .row .sub-badge { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--vscode-textLink-foreground); color: var(--vscode-textLink-foreground); white-space: nowrap; cursor: pointer; }
-  .row .sub-badge:hover { background: color-mix(in srgb, var(--vscode-textLink-foreground) 20%, transparent); }
-  .row .untracked { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--vscode-editorWarning-foreground, #cca700); color: var(--vscode-editorWarning-foreground, #cca700); white-space: nowrap; }
-  .children { margin-left: 11px; padding-left: 6px; border-left: 2px solid color-mix(in srgb, var(--cat) 45%, transparent); }
-  .sep { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
 
+  /* Header */
+  .head { display: flex; flex-direction: column; gap: 24px; }
+  .titles { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .eyebrow, .chunk .k, .donut .cap { font-size: 13px; line-height: 18px; color: var(--vscode-descriptionForeground); }
+  .big { font-size: 24px; line-height: 30px; font-weight: 400; }
+  .chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chunks { display: flex; gap: 24px; min-width: 0; }
+  .chunk { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .chunk .v { font-size: 15px; line-height: 20px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prose { line-height: 1.55; color: var(--vscode-descriptionForeground); margin: 0; }
+
+  /* Donut */
+  .donut { position: relative; width: 240px; height: 240px; margin: 16px auto; }
+  .donut svg { display: block; }
+  .arc { fill: none; stroke: var(--cat); cursor: pointer; transition: opacity 120ms ease; }
+  .arc.rest { stroke: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); cursor: default; }
+  .donut.hovering .arc:not(.hot) { opacity: .4; }
+  .donut .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; pointer-events: none; }
+  .donut .pct { font-variant-numeric: tabular-nums; }
+  .donut .cap { max-width: 160px; text-align: center; }
+
+  .callout { border: 1px solid var(--vscode-editorWarning-foreground, #cca700); background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent); border-radius: 6px; padding: 10px 12px; line-height: 1.5; }
+  .callout b { display: block; margin-bottom: 2px; }
+  .rule { height: 1px; background: var(--vscode-panel-border); }
+  .explorer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .explorer-head .actions { display: flex; gap: 8px; flex: none; }
+  .sections { display: flex; flex-direction: column; gap: 6px; }
+
+  /* Category sections and tree rows: full-width rows, nesting by inner left padding. */
+  .sec-head, .trow { display: flex; align-items: center; column-gap: 12px; width: 100%; min-width: 0; min-height: 36px; padding: 0 12px; border-radius: 6px; cursor: pointer; user-select: none; }
+  .sec-head { background: color-mix(in srgb, var(--cat) 6%, color-mix(in srgb, var(--vscode-foreground) 5%, transparent)); }
+  .sec-head:hover { background: color-mix(in srgb, var(--cat) 10%, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); }
+  .sec-head.hot { outline: 1px solid color-mix(in srgb, var(--cat) 60%, transparent); }
+  .trow { min-height: 32px; }
+  .trow:hover { background: var(--vscode-list-hoverBackground); }
+  .trow.selected, .sec-head.selected { background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
+  .box { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
+  .chev svg { width: 16px; height: 16px; fill: var(--vscode-descriptionForeground); stroke: none; transition: transform 120ms ease; }
+  .open > .chev svg, .chev.open svg { transform: rotate(90deg); }
+  .sec-head .ico { color: var(--cat); }
+  .trow .ico { color: var(--vscode-descriptionForeground); }
+  .label { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+  .label .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .label .count, .label .snippet { flex: none; color: var(--vscode-descriptionForeground); }
+  .label .snippet { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tok { flex: none; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+  .show-text { flex: none; padding: 1px 6px; font-size: 11px; opacity: 0; }
+  .sec-head:hover .show-text, .sec-head.selected .show-text { opacity: 1; }
+  .dim .name { opacity: .6; }
+  .badge { flex: none; font-size: 10px; padding: 0 5px; border-radius: 3px; white-space: nowrap; }
+  .badge.type { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .badge.sub { border: 1px solid var(--vscode-textLink-foreground); color: var(--vscode-textLink-foreground); cursor: pointer; }
+  .badge.sub:hover { background: color-mix(in srgb, var(--vscode-textLink-foreground) 20%, transparent); }
+  .badge.untracked { border: 1px solid var(--vscode-editorWarning-foreground, #cca700); color: var(--vscode-editorWarning-foreground, #cca700); }
+  .sec-body { padding-top: 4px; }
+  .sec-desc { padding: 12px 12px 4px 18px; margin-bottom: 8px; line-height: 1.55; color: var(--vscode-descriptionForeground); }
+  .sec-desc .note { display: block; margin-top: 6px; font-size: 12px; }
+  .kids { position: relative; display: flex; flex-direction: column; gap: 2px; }
+  .kids.guide::before { content: ''; position: absolute; top: 0; bottom: 0; width: 1px; background: var(--vscode-tree-indentGuidesStroke, color-mix(in srgb, var(--vscode-foreground) 15%, transparent)); }
+  .d0 { padding-left: 12px; } .d1 { padding-left: 44px; } .d2 { padding-left: 76px; } .d3 { padding-left: 108px; } .d4 { padding-left: 140px; }
+  .d5 { padding-left: 172px; } .d6 { padding-left: 204px; } .d7 { padding-left: 236px; } .d8 { padding-left: 268px; }
+  .kids.g0::before { left: 22px; } .kids.g1::before { left: 54px; } .kids.g2::before { left: 86px; } .kids.g3::before { left: 118px; }
+  .kids.g4::before { left: 150px; } .kids.g5::before { left: 182px; } .kids.g6::before { left: 214px; } .kids.g7::before { left: 246px; }
+  .empty-note { padding: 4px 12px 8px 50px; color: var(--vscode-descriptionForeground); font-size: 12px; }
+
+  /* Viewer */
   .viewer-head { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); }
   .viewer-head .vt { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .viewer-head .vm { color: var(--vscode-descriptionForeground); white-space: nowrap; }
-  .seg { display: flex; }
-  .seg button { border-radius: 0; }
-  .seg button:first-child { border-radius: 3px 0 0 3px; }
-  .seg button:last-child { border-radius: 0 3px 3px 0; }
   input.find { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 3px 6px; width: 150px; }
   #view { flex: 1; overflow: auto; min-height: 0; }
   mark { background: var(--vscode-editor-findMatchHighlightBackground, #f5d76e66); color: inherit; border-radius: 2px; }
   mark.current { outline: 1px solid var(--vscode-editor-findMatchBorder, #f5d76e); }
   .empty { color: var(--vscode-descriptionForeground); padding: 24px; }
   .error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+  .error:empty { display: none; }
 
   /* Text view: the exact characters, colored, with nested tag contents indented visually. */
   .code { padding: 12px 0 40px; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); line-height: 1.5; }
@@ -112,24 +162,19 @@
 </style>
 </head>
 <body>
-<div class="layout">
-  <div class="left">
-    <div class="toolbar">
-      <select id="chat" title="Chat"></select>
-      <button id="refresh" title="Refresh and show the focused chat">↻</button>
+<div class="app" id="app">
+  <div class="report">
+    <div class="page">
+      <div class="toolbar">
+        <select id="chat" title="Chat"></select>
+        <button id="refresh" title="Refresh and show the focused chat">↻</button>
+        <label class="follow"><input type="checkbox" id="follow"> Follow the focused chat</label>
+      </div>
+      <div id="err" class="error"></div>
+      <div id="report"></div>
     </div>
-    <div class="toolbar"><label class="follow"><input type="checkbox" id="follow"> Follow the focused chat</label></div>
-    <div class="crumbs" id="crumbs"></div>
-    <div class="card">
-      <div class="title" id="title">Context Usage</div>
-      <div class="summary"><span id="pct"></span><span id="tot"></span></div>
-      <div class="bar" id="bar"></div>
-      <div class="meta" id="meta"></div>
-      <div id="cats"></div>
-    </div>
-    <div id="err" class="error"></div>
   </div>
-  <div class="right">
+  <div class="viewer">
     <div class="viewer-head">
       <span class="vt" id="vt">Select a category or item</span>
       <span class="vm" id="vm"></span>
@@ -137,17 +182,19 @@
       <input class="find" id="find" placeholder="Find (Enter = next)">
       <button id="copy" disabled>Copy</button>
       <button id="open" disabled>Open in editor</button>
+      <button id="close" class="ghost" title="Close the text">✕</button>
     </div>
-    <div id="view"><div class="empty">Click any row on the left to see the exact text the agent received for it.</div></div>
+    <div id="view"><div class="empty">Click any row to see the exact text the agent received for it.</div></div>
   </div>
 </div>
 <script nonce="{{nonce}}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
   const state = Object.assign({ open: {}, selected: undefined, indent: true, folds: {} }, vscode.getState() || {});
-    let ctx, currentText = '', currentKind = '', findIndex = 0;
+  let ctx, currentText = '', currentKind = '', findIndex = 0;
 
-  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n ?? 0));
+  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K' : String(n ?? 0));
+  const full = (n) => Math.round(n || 0).toLocaleString('en-US');
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const save = () => vscode.setState(state);
 
@@ -157,7 +204,49 @@
     else if (m.type === 'error') $('err').textContent = m.message;
   });
 
-  // ---- left: popover replica + tree ------------------------------------------
+  // ---- icons (16x16, stroked) ---------------------------------------------------
+
+  const ICONS = {
+    chevron: '<path d="M6 4.5v7l4.5-3.5z"/>',
+    system_prompt: '<rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M5 6.5l2 1.5-2 1.5M8.5 10.5H11"/>',
+    tools: '<path d="M10.5 2.5a3 3 0 0 0-2.8 4L2.8 11.4a1.2 1.2 0 0 0 1.8 1.8l4.9-4.9a3 3 0 0 0 4-2.8l-1.8 1-1.4-.4-.4-1.4z"/>',
+    rules: '<path d="M3.5 2.5h7l2 2v9h-9z"/><path d="M5.5 7h5M5.5 9.5h5M5.5 12h3"/>',
+    skills: '<path d="M8 2l1.4 3.6L13 7l-3.6 1.4L8 12 6.6 8.4 3 7l3.6-1.4z"/><path d="M12.5 11.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/>',
+    mcp: '<rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2"/><rect x="2.5" y="9" width="11" height="4.5" rx="1.2"/><path d="M5 4.75h.01M5 11.25h.01"/>',
+    subagents: '<circle cx="6" cy="5.5" r="2.2"/><path d="M2 13c.4-2.2 2-3.5 4-3.5s3.6 1.3 4 3.5"/><circle cx="11.2" cy="6.2" r="1.7"/><path d="M11.5 9.6c1.4.2 2.3 1.3 2.5 2.9"/>',
+    summarized_conversation: '<path d="M3 4h10M3 7h7M3 10h10M3 13h5"/>',
+    conversation: '<path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/>',
+    user: '<path d="M13 3.5H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6l3 2.5v-2.5h1a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1z"/>',
+    turn: '<path d="M2.5 3h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H6L4 10.5V9H2.5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M12.5 6.5h1a1 1 0 0 1 1 1V11a1 1 0 0 1-1 1H13v1.5L11 12H8a1 1 0 0 1-1-1"/>',
+    result: '<path d="M13 3v5a2 2 0 0 1-2 2H4"/><path d="M6.5 7.5L4 10l2.5 2.5"/>',
+    reasoning: '<path d="M6 13h4M6.5 11h3c0-1.5 2.5-2.5 2.5-5a4 4 0 0 0-8 0c0 2.5 2.5 3.5 2.5 5z"/>',
+    sent_context: '<path d="M2.5 8L13.5 3l-3 10.5-2.5-4.5z"/><path d="M8 9l5.5-6"/>',
+    raw: '<path d="M6 3c-1.5 0-2 .7-2 2v1.5c0 .8-.5 1.5-1.5 1.5 1 0 1.5.7 1.5 1.5V11c0 1.3.5 2 2 2M10 3c1.5 0 2 .7 2 2v1.5c0 .8.5 1.5 1.5 1.5-1 0-1.5.7-1.5 1.5V11c0 1.3-.5 2-2 2"/>',
+    chats: '<path d="M9 3h4v4M13 3L7.5 8.5"/><path d="M11 9.5V13H3V5h3.5"/>',
+    folder: '<path d="M2 4.5a1 1 0 0 1 1-1h3.2l1.3 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>',
+    folderOpen: '<path d="M2 12V4.5a1 1 0 0 1 1-1h3.2l1.3 1.5H12a1 1 0 0 1 1 1V7"/><path d="M2 12l1.6-4.2a1 1 0 0 1 .9-.6H14l-1.7 5.2H2z"/>',
+    file: '<path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/>',
+  };
+  const icon = (name) => `<svg class="i" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name] || ICONS.file}</svg>`;
+  const chevron = (open) => `<span class="box chev${open ? ' open' : ''}" data-toggle="1"><svg viewBox="0 0 16 16" aria-hidden="true">${ICONS.chevron}</svg></span>`;
+  const blank = '<span class="box"></span>';
+
+  // ---- copy ---------------------------------------------------------------------
+
+  const ABOUT = {
+    system_prompt: 'Cursor’s own instructions to the agent: its role, tone, ground rules and how to use its tools. Sent at the start of every chat.',
+    tools: 'The tools the agent can call. Cursor’s backend attaches their definitions, so only each tool’s name and size are stored on this machine.',
+    rules: 'Standing instructions from your rules: always-applied rules in full, the others as a one-line description the agent can open when it needs them.',
+    skills: 'The skills the agent may use, each by name and description. The agent reads a skill’s full SKILL.md only when it uses it.',
+    mcp: 'Tools and instructions from MCP servers and other dynamic tool namespaces.',
+    subagents: 'The helper agents and models this agent can hand work to.',
+    summarized_conversation: 'The recap Cursor wrote when it summarized the earlier part of this chat to free up room.',
+    conversation: 'The chat itself: your messages, the agent’s replies, and every tool call and result in between, grouped by turn.',
+    raw: 'Every prompt message as Cursor stored it, in order: the exact input of the last model call.',
+    chats: 'The subagents this chat started. Each one is a chat with its own context: click one to open its report.',
+  };
+
+  // ---- report ---------------------------------------------------------------------
 
   function renderChats(chats) {
     const sel = $('chat');
@@ -167,80 +256,213 @@
     sel.value = root.composerId;
   }
 
+  const sectionCategories = () => ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
+  const isOpen = (key, byDefault) => (state.open[key] === undefined ? byDefault : state.open[key]);
+  const sectionDefault = (id) => id !== 'raw' && id !== 'sent_context';
+
   function render() {
-    const pct = ctx.maxTokens ? Math.round((ctx.totalUsedTokens / ctx.maxTokens) * 100) : 0;
-    $('pct').textContent = `${pct}% Full`;
-    $('tot').textContent = `~${fmt(ctx.totalUsedTokens)} / ${fmt(ctx.maxTokens)} Tokens`;
-    const bar = $('bar');
-    bar.innerHTML = ctx.categories.filter((c) => c.estimatedTokens > 0).map((c) => `<div class="c-${c.id}" data-tokens="${c.estimatedTokens}" title="${esc(c.label)}: ${fmt(c.estimatedTokens)}"></div>`).join('');
-    for (const seg of bar.children) seg.style.width = `${ctx.maxTokens ? (seg.dataset.tokens / ctx.maxTokens) * 100 : 0}%`;
-    $('meta').textContent = `${ctx.model || ''} · ${ctx.hasTree ? 'item spans from Cursor’s usage tree' : 'items parsed from the stored prompt'}`;
-    renderCrumbs();
-    const cats = ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
-    $('cats').innerHTML = cats.map((c) => category(c.id, c.label, c.estimatedTokens, c.items)).join('') +
-      subagentSection() +
-      '<div class="sep"></div>' + category('raw', 'All prompt messages (raw)', undefined, ctx.rawMessages);
+    $('app').classList.toggle('split', !!state.selected);
+    const scroller = document.querySelector('.report'), top = scroller.scrollTop;
+    const used = ctx.totalUsedTokens || 0, max = ctx.maxTokens || 0;
+    const pct = max ? Math.round((used / max) * 100) : 0;
+    const cats = sectionCategories();
+    const counted = cats.filter((c) => c.id !== 'sent_context');
+    const largest = [...counted].sort((a, b) => b.estimatedTokens - a.estimatedTokens)[0];
+    const subagentTitle = ctx.parent ? `Subagent${ctx.parent.type ? ` · ${ctx.parent.type}` : ''}` : '';
+
+    $('report').innerHTML =
+      '<div class="head">' +
+        crumbs() +
+        '<div class="titles">' +
+          `<span class="eyebrow">Context Usage Report${subagentTitle ? ` · ${esc(subagentTitle)}` : ''}</span>` +
+          `<span class="big chat-title" title="${esc(ctx.name)}">${esc(ctx.name)}</span>` +
+        '</div>' +
+        '<div class="chunks">' +
+          chunk('Model', ctx.model || '—') + chunk('Context size', max ? fmt(max) : '—') + chunk('Tokens used', `~${fmt(used)}`) + chunk('Messages', full(ctx.messageCount)) +
+        '</div>' +
+        '<p class="prose">The context window holds everything the agent reads on a turn: Cursor’s instructions, the tools it can use, your rules and skills, and the conversation so far. ' +
+        'This report shows each part with the exact text the model received; click a row to read it.</p>' +
+      '</div>' +
+      donut(counted, used, max, pct) +
+      (pct >= 80 && largest
+        ? `<div class="callout"><b>The context window is getting full</b>${esc(largest.label)} is the largest part at ${full(largest.estimatedTokens)} tokens. Summarizing the conversation or starting a new chat frees the most room.</div>`
+        : '') +
+      '<div class="rule"></div>' +
+      '<div class="explorer-head"><span class="big">Context Explorer</span>' +
+        `<span class="actions"><button class="ghost" id="toggle-all">${allOpen() ? 'Collapse All' : 'Expand All'}</button>` +
+        '<button id="debug" title="Open a new agent chat, with a prompt typed in for you to send, that asks how to reduce this chat’s context. It links this report and the chat’s history.">Debug with Agent</button></span></div>' +
+      `<p class="prose">What the agent’s context held on its last turn, by category. ${ctx.hasTree ? 'Category sizes are Cursor’s counts; ' : ''}sizes of single items are estimates (4 characters per token).</p>` +
+      '<div class="sections" id="sections">' +
+        cats.map((c, i) => section(c.id, c.label, c.estimatedTokens, c.items, { first: i === 0, note: c.note })).join('') +
+        chatsSection() +
+        section('raw', 'All prompt messages (raw)', undefined, ctx.rawMessages, {}) +
+      '</div>';
+    scroller.scrollTop = top;
   }
 
-  // Breadcrumb: root chat › … › current subagent. Each ancestor opens its own context.
-  function renderCrumbs() {
+  const chunk = (k, v) => `<div class="chunk"><span class="k">${esc(k)}</span><span class="v" title="${esc(v)}">${esc(v)}</span></div>`;
+
+  // Breadcrumb: root chat › … › current subagent. Each ancestor opens its own report.
+  function crumbs() {
     const chain = ctx.ancestors || [];
-    $('crumbs').innerHTML = chain.length
-      ? chain.map((a) => `<a class="crumb" data-chat="${esc(a.composerId)}" title="Open this chat’s context">${esc(a.name)}</a><span class="crumb-sep">›</span>`).join('') +
-        `<span class="crumb current">${esc(ctx.name)}</span>`
-      : '';
-    $('title').textContent = ctx.parent ? `Context Usage — subagent${ctx.parent.type ? ` (${ctx.parent.type})` : ''}` : 'Context Usage';
+    if (!chain.length) return '';
+    return '<div class="crumbs">' +
+      chain.map((a) => `<a class="crumb" data-chat="${esc(a.composerId)}" title="Open this chat’s report">${esc(a.name)}</a><span class="crumb-sep">›</span>`).join('') +
+      `<span>${esc(ctx.name)}</span></div>`;
   }
 
-  function subagentSection() {
-    const subs = ctx.subagents || [];
-    if (!subs.length) return '';
-    const key = 'subagents-list';
-    const open = state.open[key] !== false;
-    return '<div class="sep"></div>' +
-      `<div class="row sub-head" data-toggle-only="${key}"><span class="chev">${open ? '▾' : '▸'}</span>` +
-      `<span class="name">Subagents</span><span class="tok">${subs.length}</span></div>` +
-      (open ? `<div class="children sub-list">${subs.map(subRow).join('')}</div>` : '');
+  // Colored arcs for the categories, a muted arc for the free rest of the window.
+  function donut(cats, used, max, pct) {
+    const size = 240, stroke = 32, r = (size - stroke) / 2, circ = 2 * Math.PI * r, c = size / 2;
+    const slices = cats.filter((k) => k.estimatedTokens > 0).map((k) => ({ id: k.id, value: k.estimatedTokens }));
+    const sum = slices.reduce((s, k) => s + k.value, 0);
+    const total = max > 0 ? Math.max(max, sum) : sum || 1;
+    if (total > sum) slices.push({ id: 'rest', value: total - sum });
+    const gap = slices.length > 1 ? 2 : 0;
+    let start = 0;
+    const arcs = slices.map((k) => {
+      const length = (k.value / total) * circ;
+      const arc = `<circle class="arc ${k.id === 'rest' ? 'rest' : `c-${k.id}`}" data-cat="${k.id}" cx="${c}" cy="${c}" r="${r}" stroke-width="${stroke}" ` +
+        `stroke-dasharray="${Math.max(0, length - gap)} ${circ}" stroke-dashoffset="${-start}"/>`;
+      start += length;
+      return arc;
+    }).join('');
+    return `<div class="donut" id="donut" data-pct="${pct}%"><svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="${pct}% of the context window used">` +
+      `<g transform="rotate(-90 ${c} ${c})">${arcs}</g></svg>` +
+      `<div class="center"><span class="big pct" id="donut-pct">${pct}%</span><span class="cap" id="donut-cap">Full</span></div></div>`;
   }
 
-  function subRow(s) {
-    const pct = s.max ? ` · ${Math.round((s.used / s.max) * 100)}%` : '';
-    return `<div class="row sub${s.hasContext ? '' : ' dim'}" data-chat="${esc(s.composerId)}" title="${s.hasContext ? 'Open this subagent’s context' : 'No context saved for this subagent'}">` +
-      '<span class="chev">↗</span>' +
-      `<span class="name">${esc(s.name || 'Untitled subagent')}</span>` +
-      (s.type ? `<span class="type">${esc(s.type)}</span>` : '') +
-      (s.nested ? `<span class="type" title="Has its own subagents">+${s.nested}</span>` : '') +
-      `<span class="tok">${s.used ? fmt(s.used) + pct : ''}</span></div>`;
+  function hover(catId) {
+    const d = $('donut');
+    if (!d) return;
+    const cat = catId && ctx.categories.find((c) => c.id === catId && c.estimatedTokens > 0);
+    d.classList.toggle('hovering', !!cat);
+    d.querySelectorAll('.arc').forEach((a) => a.classList.toggle('hot', !!cat && a.dataset.cat === catId));
+    document.querySelectorAll('.sec-head').forEach((h) => h.classList.toggle('hot', !!cat && h.dataset.sec === catId));
+    const total = Math.max(ctx.maxTokens || 0, ctx.totalUsedTokens || 0) || 1;
+    $('donut-pct').textContent = cat ? `${Math.round((cat.estimatedTokens / total) * 100)}%` : d.dataset.pct;
+    $('donut-cap').textContent = cat ? cat.label : 'Full';
   }
 
-  function category(id, label, tokens, items) {
+  const sectionKeys = () => [...sectionCategories().map((c) => c.id), ...(ctx.subagents && ctx.subagents.length ? ['chats'] : []), 'raw'];
+  const allOpen = () => sectionKeys().every((id) => isOpen(`category:${id}`, sectionDefault(id)));
+
+  function section(id, label, tokens, items, { first, note }) {
     const key = `category:${id}`;
-    return `<div class="c-${id}">` + row(key, label, tokens, items.length > 0, true, false) +
-      (state.open[key] ? `<div class="children">${items.map(item).join('')}</div>` : '') + '</div>';
+    const open = isOpen(key, sectionDefault(id));
+    const count = leafCount(items);
+    const trailing = tokens === undefined ? '' : `~${full(tokens)}${first ? ' tokens' : ''}`;
+    return `<div class="c-${id}">` +
+      `<div class="sec-head${open ? ' open' : ''}${state.selected === key ? ' selected' : ''}" data-sec="${id}" data-key="${key}">` +
+        chevron(open) + `<span class="box ico">${icon(id)}</span>` +
+        `<span class="label"><span class="name">${esc(label)}</span>${count ? `<span class="count">${count}</span>` : ''}</span>` +
+        (items.length ? `<button class="ghost show-text" data-show="${key}" title="Show the text of the whole category">Text</button>` : '') +
+        `<span class="tok">${trailing}</span>` +
+      '</div>' +
+      (open
+        ? '<div class="sec-body">' +
+          `<div class="sec-desc">${esc(ABOUT[id] || '')}${note ? `<span class="note">${esc(note)}</span>` : ''}</div>` +
+          (id === 'conversation' ? conversation(items) : `<div class="kids">${unwrap(items).map((i) => item(i, 0, id)).join('')}</div>`) +
+          '</div>'
+        : '') +
+      '</div>';
   }
 
-  function item(i) {
+  // A category holding one block (e.g. <rules>) lists that block's sections; its own text is
+  // still the category's Text.
+  const unwrap = (items) => (items.length === 1 && items[0].children && items[0].children.length ? items[0].children : items);
+
+  const leafCount = (items) => items.reduce((n, i) => n + (i.children && i.children.length ? leafCount(i.children) : 1), 0);
+
+  // A turn starts at each message holding a user query; what comes before is the preamble.
+  function conversation(items) {
+    const isQuery = (i) => i.kind === 'user_query' || (i.kind === 'user' && /^User: /.test(i.label));
+    if (!items.some(isQuery)) return `<div class="kids">${items.map((i) => item(i, 0, 'conversation')).join('')}</div>`;
+    const turns = [{ title: 'Before the first message', items: [] }];
+    for (const i of items) {
+      if (isQuery(i)) turns.push({ title: `Turn ${turns.length}`, snippet: i.label.replace(/^User: /, ''), items: [] });
+      turns[turns.length - 1].items.push(i);
+    }
+    return '<div class="kids">' + turns.filter((t) => t.items.length).map((t, n, all) => {
+      const key = `turn:${t.title}`;
+      const open = isOpen(key, n === all.length - 1);
+      const tokens = t.items.reduce((s, i) => s + (i.estimatedTokens || 0), 0);
+      return `<div class="trow d0${open ? ' open' : ''}" data-turn="${esc(key)}" data-open="${open ? 1 : 0}">` + chevron(open) + `<span class="box ico">${icon('turn')}</span>` +
+        `<span class="label"><span class="name">${esc(t.title)}</span><span class="count">${t.items.length}</span>${t.snippet ? `<span class="snippet">${esc(t.snippet)}</span>` : ''}</span>` +
+        `<span class="tok">~${full(tokens)}</span></div>` +
+        (open ? `<div class="kids guide g0">${t.items.map((i) => item(i, 1, 'conversation')).join('')}</div>` : '');
+    }).join('') + '</div>';
+  }
+
+  // Readable names: a file path shows its file (a skill its folder), a bare tag its words.
+  function display(label) {
+    const tag = /^<([\w:.-]+)>( \(part\))?$/.exec(label);
+    if (tag) {
+      const words = tag[1].replace(/[_-]+/g, ' ');
+      return words.charAt(0).toUpperCase() + words.slice(1) + (tag[2] || '');
+    }
+    if (/^\S*\/\S+$/.test(label)) {
+      const parts = label.split('/').filter(Boolean);
+      const base = parts[parts.length - 1];
+      return base === 'SKILL.md' && parts.length > 1 ? parts[parts.length - 2] : base.replace(/\.mdc$/, '');
+    }
+    return label;
+  }
+
+  function leafIcon(i, cat) {
+    if (cat !== 'conversation') return cat;
+    const l = i.label;
+    if (i.kind === 'user' || i.kind === 'user_query') return 'user';
+    if (/reasoning/i.test(l)) return 'reasoning';
+    if (/result$/.test(l) || i.kind === 'tool_result') return 'result';
+    if (/args$|call/i.test(l) || i.kind === 'tool_call' || i.kind === 'tool_call_pair') return 'tools';
+    return 'conversation';
+  }
+
+  function item(i, depth, cat) {
     const kids = i.children && i.children.length;
+    const open = kids && !!state.open[i.id];
     const subs = i.subagents || [];
     const subsKey = `subs:${i.id}`;
-    return row(i.id, i.label, i.estimatedTokens, kids, false, i.unavailable, i.untracked, subs, subsKey) +
-      (subs.length > 1 && state.open[subsKey] ? `<div class="children sub-list">${subs.map((s) => subRow(ctx.subagents.find((x) => x.composerId === s.composerId) || s)).join('')}</div>` : '') +
-      (kids && state.open[i.id] ? `<div class="children">${i.children.map(item).join('')}</div>` : '');
+    const d = Math.min(depth, 8);
+    const lead = kids ? icon(open ? 'folderOpen' : 'folder') : icon(leafIcon(i, cat));
+    return `<div class="trow d${d}${open ? ' open' : ''}${state.selected === i.id ? ' selected' : ''}${i.unavailable ? ' dim' : ''}" data-id="${esc(i.id)}">` +
+      (kids ? chevron(open) : blank) + `<span class="box ico">${lead}</span>` +
+      `<span class="label"><span class="name" title="${esc(i.label)}">${esc(display(i.label))}</span>${kids ? `<span class="count">${leafCount(i.children)}</span>` : ''}</span>` +
+      subBadge(subs, subsKey) +
+      (i.untracked ? '<span class="badge untracked" title="Not in Cursor’s usage breakdown: the model received this text, but Cursor did not attribute it to a category. Token count is an estimate.">not counted</span>' : '') +
+      `<span class="tok">${i.estimatedTokens === undefined ? '' : `~${full(i.estimatedTokens)}`}</span></div>` +
+      (subs.length > 1 && state.open[subsKey] ? `<div class="kids guide g${d}">${subs.map((s) => chatRow(ctx.subagents.find((x) => x.composerId === s.composerId) || s, depth + 1)).join('')}</div>` : '') +
+      (open ? `<div class="kids guide g${d}">${i.children.map((c) => item(c, depth + 1, cat)).join('')}</div>` : '');
   }
 
-  function row(id, label, tokens, expandable, swatch, dim, untracked, subagents = [], subsKey) {
-    const chev = expandable ? (state.open[id] ? '▾' : '▸') : '';
-    return `<div class="row${state.selected === id ? ' selected' : ''}${dim ? ' dim' : ''}" data-id="${esc(id)}">` +
-      `<span class="chev" data-toggle="1">${chev}</span>` +
-      (swatch ? '<span class="sw"></span>' : '') +
-      `<span class="name" title="${esc(label)}">${esc(label)}</span>` +
-      (subagents.length === 1
-        ? `<span class="sub-badge" data-chat="${esc(subagents[0].composerId)}" title="Open subagent: ${esc(subagents[0].name || '')}">↗ ${esc(shorten(subagents[0].name || 'subagent', 18))}</span>`
-        : subagents.length > 1
-          ? `<span class="sub-badge" data-toggle-only="${esc(subsKey)}" title="Spawned ${subagents.length} subagents — click to list them">↗ ${subagents.length} subagents ${state.open[subsKey] ? '▾' : '▸'}</span>`
-          : '') +
-      (untracked ? '<span class="untracked" title="Not in Cursor’s usage breakdown: the model received this text, but Cursor did not attribute it to a category. Token count is an estimate.">not counted</span>' : '') +
-      `<span class="tok">${tokens === undefined ? '' : fmt(tokens)}</span></div>`;
+  function subBadge(subs, key) {
+    if (subs.length === 1) return `<span class="badge sub" data-chat="${esc(subs[0].composerId)}" title="Open subagent: ${esc(subs[0].name || '')}">↗ ${esc(shorten(subs[0].name || 'subagent', 18))}</span>`;
+    if (subs.length > 1) return `<span class="badge sub" data-toggle-only="${esc(key)}" title="Spawned ${subs.length} subagents — click to list them">↗ ${subs.length} subagents</span>`;
+    return '';
+  }
+
+  function chatsSection() {
+    const subs = ctx.subagents || [];
+    if (!subs.length) return '';
+    const key = 'category:chats';
+    const open = isOpen(key, true);
+    const used = subs.reduce((s, x) => s + (x.used || 0), 0);
+    return '<div class="c-chats">' +
+      `<div class="sec-head${open ? ' open' : ''}" data-sec="chats" data-key="${key}">` + chevron(open) + `<span class="box ico">${icon('subagents')}</span>` +
+      `<span class="label"><span class="name">Subagent chats</span><span class="count">${subs.length}</span></span><span class="tok">${used ? `~${full(used)}` : ''}</span></div>` +
+      (open ? `<div class="sec-body"><div class="sec-desc">${esc(ABOUT.chats)}</div><div class="kids">${subs.map((s) => chatRow(s, 0)).join('')}</div></div>` : '') +
+      '</div>';
+  }
+
+  function chatRow(s, depth) {
+    const pct = s.max ? ` · ${Math.round((s.used / s.max) * 100)}%` : '';
+    return `<div class="trow d${Math.min(depth, 8)}${s.hasContext ? '' : ' dim'}" data-chat="${esc(s.composerId)}" title="${s.hasContext ? 'Open this subagent’s report' : 'No context saved for this subagent'}">` +
+      blank + `<span class="box ico">${icon('chats')}</span>` +
+      `<span class="label"><span class="name">${esc(s.name || 'Untitled subagent')}</span>` +
+      (s.type ? `<span class="badge type">${esc(s.type)}</span>` : '') +
+      (s.nested ? `<span class="badge type" title="Has its own subagents">+${s.nested}</span>` : '') + '</span>' +
+      `<span class="tok">${s.used ? `~${full(s.used)}${pct}` : ''}</span></div>`;
   }
 
   const shorten = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -250,31 +472,49 @@
     vscode.postMessage({ type: 'openChat', chatId });
   }
 
-  $('crumbs').addEventListener('click', (e) => { const a = e.target.closest('[data-chat]'); if (a) openChat(a.dataset.chat); });
-
-  $('cats').addEventListener('click', (e) => {
+  $('report').addEventListener('click', (e) => {
+    if (e.target.closest('#toggle-all')) {
+      const next = !allOpen();
+      for (const id of sectionKeys()) state.open[`category:${id}`] = next;
+      save(); render(); return;
+    }
+    if (e.target.closest('#debug')) { vscode.postMessage({ type: 'debugWithAgent' }); return; }
+    const show = e.target.closest('[data-show]');
+    if (show) { select(show.dataset.show); return; }
     const chat = e.target.closest('[data-chat]');
     if (chat) { if (!chat.classList.contains('dim')) openChat(chat.dataset.chat); return; }
     const only = e.target.closest('[data-toggle-only]');
-    if (only) {
-      const k = only.dataset.toggleOnly;
-      // The Subagents section starts open; per-item subagent lists start closed.
-      state.open[k] = k === 'subagents-list' ? state.open[k] === false : !state.open[k];
+    if (only) { state.open[only.dataset.toggleOnly] = !state.open[only.dataset.toggleOnly]; save(); render(); return; }
+    const head = e.target.closest('.sec-head');
+    if (head) {
+      const k = head.dataset.key;
+      state.open[k] = !isOpen(k, sectionDefault(head.dataset.sec));
       save(); render(); return;
     }
-    const r = e.target.closest('.row'); if (!r) return;
+    const turn = e.target.closest('[data-turn]');
+    if (turn) { state.open[turn.dataset.turn] = turn.dataset.open !== '1'; save(); render(); return; }
+    const r = e.target.closest('.trow[data-id]'); if (!r) return;
     const id = r.dataset.id;
-    // Chevron or a second click toggles; first click on a category also expands it.
-    if ((e.target.dataset.toggle && e.target.textContent) || state.selected === id) state.open[id] = !state.open[id];
-    else if (id.startsWith('category:')) state.open[id] = true;
+    // The chevron folds; a click on the selected row folds too; a first click selects (and opens a folder).
+    if (e.target.closest('[data-toggle]')) { state.open[id] = !state.open[id]; save(); render(); return; }
+    if (state.selected === id) state.open[id] = !state.open[id];
+    else if (r.querySelector('[data-toggle]')) state.open[id] = true;
     select(id);
   });
+
+  $('report').addEventListener('mouseover', (e) => {
+    const t = e.target.closest('.arc:not(.rest), .sec-head');
+    hover(t ? t.dataset.cat || t.dataset.sec : undefined);
+  });
+  $('report').addEventListener('mouseleave', () => hover());
 
   function select(id, quiet) {
     state.selected = id; save(); render();
     if (!quiet) $('vt').textContent = 'Loading…';
     vscode.postMessage({ type: 'text', id });
   }
+
+  $('close').addEventListener('click', () => { state.selected = undefined; save(); render(); });
 
   // ---- right: viewer ------------------------------------------------------------
 

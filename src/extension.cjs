@@ -10,6 +10,7 @@ const storeIndex = require('./storeIndex.cjs');
 const sentContext = require('./sentContext.cjs');
 const stopHook = require('./stopHook.cjs');
 const requests = require('./requests.cjs');
+const contextReport = require('./contextReport.cjs');
 
 const VIEW_TYPE = 'cursorContextInspector';
 let focus;
@@ -391,6 +392,8 @@ class Inspector {
           return this.post({ type: 'text', id: m.id, ...this.textFor(m.id) });
         case 'copy':
           return vscode.env.clipboard.writeText(this.textFor(m.id).text).then(() => vscode.window.setStatusBarMessage('Context text copied', 2000));
+        case 'debugWithAgent':
+          return this.debugWithAgent().catch((err) => this.post({ type: 'error', message: `Debug with Agent: ${err.message}` }));
         case 'openEditor': {
           const t = this.textFor(m.id);
           return vscode.workspace
@@ -436,11 +439,27 @@ class Inspector {
       const sent = sentContext.panelCategory(historyDir(), readMeta(this.chatId));
       if (sent) ctx.categories.push(sent);
       this.loadedAt = ctx.lastUpdatedAt;
+      this.ctx = ctx;
       this.index(ctx);
       this.post({ type: 'context', chats, follow: this.follow, context: { ...skeleton(ctx), ancestors: store.ancestors(db, this.chatId) } });
     } catch (err) {
       this.post({ type: 'error', message: `${err.message}\n\nDatabase: ${this.dbPath}` });
     }
+  }
+
+  // Writes the shown chat's report and opens a new agent chat with a prompt that points to it and
+  // to the chat's recorded history. The prompt is only typed in: the user sends it.
+  async debugWithAgent() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const dir = path.join(this.context.globalStorageUri.fsPath, 'reports');
+    fs.mkdirSync(dir, { recursive: true });
+    const reportPath = path.join(dir, `${ctx.composerId}.md`);
+    fs.writeFileSync(reportPath, contextReport.renderReport(ctx));
+    const entry = findEntry(ctx.composerId);
+    const historyPath = entry && path.join(historyDir(), entry.path);
+    const query = contextReport.debugPrompt({ name: ctx.name, composerId: ctx.composerId, reportPath, historyPath });
+    await vscode.commands.executeCommand('workbench.action.chat.open', { query });
   }
 
   index(ctx) {
@@ -493,6 +512,7 @@ function skeleton(ctx) {
     name: ctx.name,
     model: ctx.model,
     hasTree: ctx.hasTree,
+    messageCount: ctx.messageCount,
     totalUsedTokens: ctx.totalUsedTokens,
     maxTokens: ctx.maxTokens,
     categories: ctx.categories.map((c) => ({ ...c, items: c.items.map(strip) })),

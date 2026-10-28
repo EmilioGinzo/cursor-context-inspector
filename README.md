@@ -100,10 +100,21 @@ Open the inspector in any of these ways:
 
 ![The Conversation category expanded with the "User: ping" message selected, showing the user query and the context Cursor attached to it](docs/images/inspector-message.png)
 
-- **Breakdown.** The left side mirrors the Context Usage popover. Click a
-  category to expand it into its items: each rule, skill, MCP server, subagent,
-  message, tool call and tool result.
-- **Text.** Click a category or item to see its text on the right. **Find**,
+- **Report.** The inspector opens as a context usage report in the style of
+  Cursor's own **View Report** canvas (Cursor 3.25): the chat name, model,
+  context size and tokens used, a donut of the window by category (hover a
+  slice or a category to see its share), and a **Context Explorer** with one
+  section per category. Sections open and close one by one or with
+  **Expand All**; rules, skills and other nested blocks are folders, the
+  conversation is grouped into turns, and **Tool definitions** lists each tool
+  with Cursor's own token count.
+- **Debug with Agent.** Writes the shown chat's full report (every category
+  and item with its exact text) to the extension's storage, and opens a new
+  agent chat with a prompt typed in that asks how to reduce the chat's
+  context. The prompt links the report and the chat's recorded history
+  (`chat.md`, `transcript.md`). Nothing is sent until you press Enter.
+- **Text.** Click an item to see its text in a pane beside the report (✕ closes
+  it); a section's **Text** button shows the whole category. **Find**,
   **Copy** and **Open in editor** work on whatever is selected. **All prompt
   messages (raw)** lists every message exactly as stored.
 - **Exact characters.** Text is shown as the model received it, color-coded

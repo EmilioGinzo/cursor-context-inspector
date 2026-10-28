@@ -258,7 +258,6 @@
 
   const sectionCategories = () => ctx.categories.filter((c) => c.estimatedTokens > 0 || c.items.length);
   const isOpen = (key, byDefault) => (state.open[key] === undefined ? byDefault : state.open[key]);
-  const sectionDefault = (id) => id !== 'raw' && id !== 'sent_context';
 
   function render() {
     $('app').classList.toggle('split', !!state.selected);
@@ -345,11 +344,11 @@
   }
 
   const sectionKeys = () => [...sectionCategories().map((c) => c.id), ...(ctx.subagents && ctx.subagents.length ? ['chats'] : []), 'raw'];
-  const allOpen = () => sectionKeys().every((id) => isOpen(`category:${id}`, sectionDefault(id)));
+  const allOpen = () => sectionKeys().every((id) => isOpen(`category:${id}`, false));
 
   function section(id, label, tokens, items, { first, note }) {
     const key = `category:${id}`;
-    const open = isOpen(key, sectionDefault(id));
+    const open = isOpen(key, false);
     const count = leafCount(items);
     const trailing = tokens === undefined ? '' : `~${full(tokens)}${first ? ' tokens' : ''}`;
     return `<div class="c-${id}">` +
@@ -446,7 +445,7 @@
     const subs = ctx.subagents || [];
     if (!subs.length) return '';
     const key = 'category:chats';
-    const open = isOpen(key, true);
+    const open = isOpen(key, false);
     const used = subs.reduce((s, x) => s + (x.used || 0), 0);
     return '<div class="c-chats">' +
       `<div class="sec-head${open ? ' open' : ''}" data-sec="chats" data-key="${key}">` + chevron(open) + `<span class="box ico">${icon('subagents')}</span>` +
@@ -479,6 +478,15 @@
       save(); render(); return;
     }
     if (e.target.closest('#debug')) { vscode.postMessage({ type: 'debugWithAgent' }); return; }
+    // A slice of the donut opens its category and scrolls to it.
+    const arc = e.target.closest('.arc:not(.rest)');
+    if (arc) {
+      state.open[`category:${arc.dataset.cat}`] = true;
+      save(); render();
+      const head = document.querySelector(`.sec-head[data-sec="${arc.dataset.cat}"]`);
+      if (head) head.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return;
+    }
     const show = e.target.closest('[data-show]');
     if (show) { select(show.dataset.show); return; }
     const chat = e.target.closest('[data-chat]');
@@ -488,7 +496,7 @@
     const head = e.target.closest('.sec-head');
     if (head) {
       const k = head.dataset.key;
-      state.open[k] = !isOpen(k, sectionDefault(head.dataset.sec));
+      state.open[k] = !isOpen(k, false);
       save(); render(); return;
     }
     const turn = e.target.closest('[data-turn]');

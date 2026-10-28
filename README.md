@@ -103,9 +103,9 @@ Open the inspector in any of these ways:
 - **Report.** The inspector opens as a context usage report in the style of
   Cursor's own **View Report** canvas (Cursor 3.25): the chat name, model,
   context size and tokens used, a donut of the window by category (hover a
-  slice or a category to see its share), and a **Context Explorer** with one
-  section per category. Sections open and close one by one or with
-  **Expand All**; rules, skills and other nested blocks are folders, the
+  slice or a category to see its share, click a slice to open its category),
+  and a **Context Explorer** with one section per category. Sections start
+  collapsed and open one by one or with **Expand All**; rules, skills and other nested blocks are folders, the
   conversation is grouped into turns, and **Tool definitions** lists each tool
   with Cursor's own token count.
 - **Debug with Agent.** Writes the shown chat's full report (every category
